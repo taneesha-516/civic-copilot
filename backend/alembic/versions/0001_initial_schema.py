@@ -32,11 +32,11 @@ priority_level = postgresql.ENUM("low", "medium", "high", "critical", name="prio
 
 def upgrade() -> None:
     bind = op.get_bind()
-    user_role.create(bind, checkfirst=True)
-    complaint_source.create(bind, checkfirst=True)
-    urgency_level.create(bind, checkfirst=True)
-    damage_level.create(bind, checkfirst=True)
-    priority_level.create(bind, checkfirst=True)
+    #user_role.create(bind, checkfirst=True)
+    #complaint_source.create(bind, checkfirst=True)
+    #urgency_level.create(bind, checkfirst=True)
+    #damage_level.create(bind, checkfirst=True)
+    #priority_level.create(bind, checkfirst=True)
 
     op.create_table(
         "departments",
