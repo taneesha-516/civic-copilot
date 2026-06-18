@@ -1,0 +1,25 @@
+{
+  "name": "Civic Copilot",
+  "short_name": "CivicAI",
+  "description": "AI-powered citizen complaint management for Delhi civic issues.",
+  "start_url": "/citizen",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#1B4FD8",
+  "background_color": "#F8FAFC",
+  "icons": [
+    {
+      "src": "/icons/civic-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/civic-icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

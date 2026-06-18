@@ -1,0 +1,56 @@
+Detected multiple renderers concurrently rendering the same context provider. This is currently unsupported.
+Detected multiple renderers concurrently rendering the same context provider. This is currently unsupported.
+Detected multiple renderers concurrently rendering the same context provider. This is currently unsupported.
+Detected multiple renderers concurrently rendering the same context provider. This is currently unsupported.
+
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+[2m5:47:06 pm[22m [31m[1m[vite][22m[39m [31mInternal server error: fetch failed[39m
+      at Object.processResponse (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:237:16)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:1081:19
+      at node:internal/process/task_queues:151:7
+      at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+      at AsyncResource.runMicrotask (node:internal/process/task_queues:148:8)
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\index.js:157:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at async fetch5 (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:59000:20)
+      at async _Miniflare.dispatchFetch (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:89442:22)
+      at async file:///C:/Users/Khanak%20Bhatia/Documents/Codex/2026-06-16/you-are-a-senior-product-engineer/node_modules/@cloudflare/vite-plugin/dist/index.mjs:34226:19
+[2m5:47:22 pm[22m [31m[1m[vite][22m[39m [31mInternal server error: fetch failed[39m
+      at Object.processResponse (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:237:16)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:1081:19
+      at node:internal/process/task_queues:151:7
+      at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+      at AsyncResource.runMicrotask (node:internal/process/task_queues:148:8)
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\index.js:157:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at async fetch5 (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:59000:20)
+      at async _Miniflare.dispatchFetch (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:89442:22)
+      at async file:///C:/Users/Khanak%20Bhatia/Documents/Codex/2026-06-16/you-are-a-senior-product-engineer/node_modules/@cloudflare/vite-plugin/dist/index.mjs:34226:19
+
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+[2m5:48:33 pm[22m [31m[1m[vite][22m[39m [31mInternal server error: fetch failed[39m
+      at Object.processResponse (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:237:16)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:1081:19
+      at node:internal/process/task_queues:151:7
+      at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+      at AsyncResource.runMicrotask (node:internal/process/task_queues:148:8)
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\index.js:157:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at async fetch5 (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:59000:20)
+      at async _Miniflare.dispatchFetch (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:89442:22)
+      at async file:///C:/Users/Khanak%20Bhatia/Documents/Codex/2026-06-16/you-are-a-senior-product-engineer/node_modules/@cloudflare/vite-plugin/dist/index.mjs:34226:19
+[2m5:49:27 pm[22m [31m[1m[vite][22m[39m [31mInternal server error: fetch failed[39m
+      at Object.processResponse (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:237:16)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\lib\web\fetch\index.js:1081:19
+      at node:internal/process/task_queues:151:7
+      at AsyncResource.runInAsyncScope (node:async_hooks:214:14)
+      at AsyncResource.runMicrotask (node:internal/process/task_queues:148:8)
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\undici\index.js:157:7
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at async fetch5 (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:59000:20)
+      at async _Miniflare.dispatchFetch (C:\Users\Khanak Bhatia\Documents\Codex\2026-06-16\you-are-a-senior-product-engineer\node_modules\miniflare\dist\src\index.js:89442:22)
+      at async file:///C:/Users/Khanak%20Bhatia/Documents/Codex/2026-06-16/you-are-a-senior-product-engineer/node_modules/@cloudflare/vite-plugin/dist/index.mjs:34226:19
