@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     )
 
     UPLOAD_DIR: str = "uploads"
-    NLP_SERVICE_URL: str = "http://localhost:9001/analyze"
-    NLP_SERVICE_TIMEOUT_SECONDS: float = 10
+    NLP_SERVICE_URL: str = "http://localhost:9001/process"
+    NLP_SERVICE_TIMEOUT_SECONDS: float = 30.0
     CV_SERVICE_URL: str = "http://localhost:9002/detect"
     CV_SERVICE_TIMEOUT_SECONDS: float = 20
     INTEGRATION_RETRY_ATTEMPTS: int = 3

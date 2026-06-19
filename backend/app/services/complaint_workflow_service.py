@@ -199,7 +199,7 @@ class ComplaintWorkflowService:
     ) -> NLPServiceResponse:
         response = await client.post(
             settings.NLP_SERVICE_URL,
-            json={"complaint_text": complaint_text},
+            json={"complaint": complaint_text},
             timeout=settings.NLP_SERVICE_TIMEOUT_SECONDS,
         )
         response.raise_for_status()

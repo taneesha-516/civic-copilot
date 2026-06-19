@@ -44,11 +44,12 @@ def process_complaint(request: ComplaintRequest):
         )
 
         return {
-            "analysis": analysis,
-            "department": department,
-            "formal_complaint": formal_complaint
+               "issue_type": analysis["issue_type"],
+               "location": analysis["location"],
+               "urgency": analysis["urgency"],
+                "department": department,
+              "formal_complaint": formal_complaint
         }
-
     except Exception as e:
 
         raise HTTPException(
