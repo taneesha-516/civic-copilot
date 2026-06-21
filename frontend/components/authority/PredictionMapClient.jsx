@@ -1,7 +1,7 @@
 "use client";
 
 import { Activity, WifiOff } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { NoPredictions } from "@/components/design-system/EmptyStates";
 import { useToast } from "@/components/design-system/ToastSystem";
 import { mockPredictions } from "@/src/data/mockPredictions";
@@ -157,13 +157,16 @@ function popupHtml(prediction, alerted = false) {
   `;
 }
 
-export default function PredictionMapClient() {
+export default function PredictionMapClient({ predictions }) {
   const mapNodeRef = useRef(null);
   const mapRef = useRef(null);
+  const leafletRef = useRef(null);
   const markerLayerRef = useRef(null);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState("");
   const toast = useToast();
+
+  const list = useMemo(() => predictions ?? mockPredictions, [predictions]);
 
   useEffect(() => {
     let disposed = false;
@@ -194,46 +197,8 @@ export default function PredictionMapClient() {
 
         const markerLayer = L.layerGroup().addTo(map);
         mapRef.current = map;
+        leafletRef.current = L;
         markerLayerRef.current = markerLayer;
-
-        mockPredictions.forEach((prediction) => {
-          const marker = L.marker([prediction.latitude, prediction.longitude], {
-            icon: L.divIcon({
-              className: "civic-risk-div-icon",
-              html: markerHtml(prediction),
-              iconSize: [132, 92],
-              iconAnchor: [66, 30],
-              popupAnchor: [0, -22],
-            }),
-          }).bindPopup(popupHtml(prediction), {
-            className: "civic-risk-popup",
-            closeButton: false,
-            maxWidth: 280,
-            offset: L.point(0, -8),
-          });
-
-          marker.on("popupopen", (event) => {
-            const button = event.popup
-              .getElement()
-              ?.querySelector(`[data-prediction-alert="${prediction.id}"]`);
-
-            button?.addEventListener(
-              "click",
-              () => {
-                const department = departmentForPrediction(prediction);
-                marker.setPopupContent(popupHtml(prediction, true));
-                marker.openPopup();
-                toast.success(
-                  `${department} has been notified about ${locationShortName(prediction.location_name)} risk`,
-                  "Prediction alert queued for field verification.",
-                );
-              },
-              { once: true },
-            );
-          });
-
-          marker.addTo(markerLayer);
-        });
 
         map.whenReady(() => {
           window.requestAnimationFrame(() => {
@@ -258,10 +223,58 @@ export default function PredictionMapClient() {
         mapRef.current = null;
       }
       markerLayerRef.current = null;
+      leafletRef.current = null;
     };
   }, [toast]);
 
-  if (mockPredictions.length === 0) {
+  useEffect(() => {
+    if (!mapReady || !leafletRef.current || !markerLayerRef.current) return;
+
+    const L = leafletRef.current;
+    const markerLayer = markerLayerRef.current;
+    markerLayer.clearLayers();
+
+    list.forEach((prediction) => {
+      const marker = L.marker([prediction.latitude, prediction.longitude], {
+        icon: L.divIcon({
+          className: "civic-risk-div-icon",
+          html: markerHtml(prediction),
+          iconSize: [132, 92],
+          iconAnchor: [66, 30],
+          popupAnchor: [0, -22],
+        }),
+      }).bindPopup(popupHtml(prediction), {
+        className: "civic-risk-popup",
+        closeButton: false,
+        maxWidth: 280,
+        offset: L.point(0, -8),
+      });
+
+      marker.on("popupopen", (event) => {
+        const button = event.popup
+          .getElement()
+          ?.querySelector(`[data-prediction-alert="${prediction.id}"]`);
+
+        button?.addEventListener(
+          "click",
+          () => {
+            const department = departmentForPrediction(prediction);
+            marker.setPopupContent(popupHtml(prediction, true));
+            marker.openPopup();
+            toast.success(
+              `${department} has been notified about ${locationShortName(prediction.location_name)} risk`,
+              "Prediction alert queued for field verification.",
+            );
+          },
+          { once: true },
+        );
+      });
+
+      marker.addTo(markerLayer);
+    });
+  }, [mapReady, list, toast]);
+
+  if (list.length === 0) {
     return (
       <section className="rounded-card bg-white p-6 shadow-card">
         <NoPredictions />
@@ -280,7 +293,7 @@ export default function PredictionMapClient() {
               <Activity className="h-5 w-5 animate-pulse" />
             </div>
             <p className="mt-3 text-sm font-extrabold text-text-primary">Loading forecast layer</p>
-            <p className="mt-1 text-xs text-text-secondary">Rendering 3 live prediction hotspots</p>
+            <p className="mt-1 text-xs text-text-secondary">Rendering {list.length} live prediction hotspots</p>
           </div>
         </div>
       ) : null}
@@ -302,7 +315,7 @@ export default function PredictionMapClient() {
           Active Risk Forecast
         </p>
         <p className="mt-1 text-sm font-extrabold text-text-primary">
-          3 hotspots under observation
+          {list.length} {list.length === 1 ? "hotspot" : "hotspots"} under observation
         </p>
       </div>
 

@@ -276,6 +276,7 @@ export default function DelhiHeatMap({
   predictionsVisible,
   onPredictionsVisibleChange,
   onShowAllCategories,
+  heatmapData,
   children,
 }) {
   const mapNodeRef = useRef(null);
@@ -293,6 +294,26 @@ export default function DelhiHeatMap({
   const selectedCategory = categoryFilter ?? activeCategory;
   const predictionsShown = predictionsVisible ?? internalShowPredictions;
   const sourcePoints = useMemo(() => {
+    if (heatmapData?.heatmap_points?.length) {
+      return heatmapData.heatmap_points.map((point, index) => ({
+        ...point,
+        id: point.complaint_id ?? `heatmap-${index}`,
+        area: point.location ?? "Delhi",
+        category: categoryForComplaint(point),
+        lat: Number(point.latitude ?? 28.6139),
+        lng: Number(point.longitude ?? 77.209),
+        intensity: Math.max(
+          0.3,
+          Math.min(
+            1,
+            Number(point.weight ?? (point.priority_score ? point.priority_score / 100 : 0.5)),
+          ),
+        ),
+        severity: severityForComplaint(point),
+        ageDays: ageDaysForComplaint(point),
+      }));
+    }
+
     if (!complaintPoints?.length) return HEAT_POINTS;
 
     return complaintPoints.map((complaint, index) => ({
@@ -305,7 +326,7 @@ export default function DelhiHeatMap({
       severity: severityForComplaint(complaint),
       ageDays: ageDaysForComplaint(complaint),
     }));
-  }, [complaintPoints]);
+  }, [complaintPoints, heatmapData]);
 
   const filteredPoints = useMemo(() => {
     return sourcePoints.filter((point) => {
@@ -506,12 +527,12 @@ export default function DelhiHeatMap({
   return (
     <article
       className={cn(
-        "civic-delhi-map relative overflow-hidden rounded-card border border-white bg-white shadow-card",
+        "civic-delhi-map relative overflow-visible rounded-card border border-white bg-white shadow-card",
         heightClass,
         className,
       )}
     >
-      <div ref={mapNodeRef} className="h-full w-full" />
+      <div ref={mapNodeRef} className="h-full w-full overflow-hidden rounded-card" />
 
       {!mapError ? (
         <div
@@ -564,7 +585,7 @@ export default function DelhiHeatMap({
               Active Complaints
             </p>
             <p className="mt-1 text-2xl font-extrabold tracking-[-0.03em] text-primary">
-              127
+              {filteredPoints.length}
             </p>
             <p className="mt-0.5 text-xs font-medium text-text-secondary">Across Delhi NCR</p>
           </div>

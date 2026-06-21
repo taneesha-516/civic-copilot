@@ -107,7 +107,7 @@ function AnimatedInlineNumber({ value, suffix = "", decimals = 0 }) {
 }
 
 function locationShortName(locationName) {
-  return locationName.replace(" Central Market", "").replace(" TV Tower Road", "");
+  return String(locationName ?? "").replace(" Central Market", "").replace(" TV Tower Road", "");
 }
 
 function generateAccuracyData() {
@@ -154,16 +154,57 @@ function PredictionsPageContent() {
   );
 }
 
-export function PredictionsWorkspace() {
+function inferCoordinates(location) {
+  const normalized = location.toLowerCase();
+
+  if (normalized.includes("karol")) return { latitude: 28.6517, longitude: 77.1907 };
+  if (normalized.includes("chandni")) return { latitude: 28.6562, longitude: 77.2301 };
+  if (normalized.includes("rohini")) return { latitude: 28.7285, longitude: 77.1174 };
+  if (normalized.includes("dwarka")) return { latitude: 28.5811, longitude: 77.057 };
+  if (normalized.includes("saket")) return { latitude: 28.5244, longitude: 77.2066 };
+  if (normalized.includes("lajpat")) return { latitude: 28.5708, longitude: 77.2433 };
+
+  return { latitude: 28.6328, longitude: 77.2197 };
+}
+
+export function PredictionsWorkspace({ predictionsData }) {
+  const predictions = useMemo(() => {
+    if (!predictionsData?.hotspots) return mockPredictions;
+    return predictionsData.hotspots.filter((hotspot) => !isPlaceholderArea(hotspot.area)).map((hotspot, index) => {
+      const coordinates = inferCoordinates(hotspot.area);
+      const confidence_percentage = Math.round(hotspot.risk_score * 100);
+      return {
+        id: `prediction-${index}`,
+        location_name: hotspot.area,
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude,
+        predicted_issue: hotspot.predicted_issue,
+        confidence_percentage,
+        predicted_timeframe: confidence_percentage >= 80 ? "Within 7 days" : "Within 14 days",
+        historical_complaint_count: hotspot.expected_reports,
+        change_percentage: `+${Math.round(hotspot.hotspot_score * 3.5)}%`,
+        reasoning: `Civic Copilot detected recurring complaints in ${hotspot.area} with a predicted density of ${hotspot.predicted_density.toFixed(1)} and average severity of ${hotspot.average_severity_score.toFixed(1)}/100.`,
+        recommended_action: `Mobilize inspections for potential ${hotspot.predicted_issue.toLowerCase()} risks.`,
+      };
+    });
+  }, [predictionsData]);
+
+  const modelAccuracy = predictionsData?.model_accuracy ? Math.round(predictionsData.model_accuracy * 100) : 84.3;
+
   return (
     <div className="space-y-6 p-6 pb-12">
-      <PageHeader />
-      <PredictionMap />
-      <PredictionCards />
+      <PageHeader modelAccuracy={modelAccuracy} />
+      <PredictionMap predictions={predictions} />
+      <PredictionCards predictions={predictions} />
       <AccuracyChart />
-      <RecurringIssuesPanel />
+      <RecurringIssuesPanel predictions={predictions} />
     </div>
   );
+}
+
+function isPlaceholderArea(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return !normalized || normalized === "string" || normalized.includes("unknown");
 }
 
 function Sidebar() {
@@ -269,7 +310,8 @@ function TopHeader() {
   );
 }
 
-function PageHeader() {
+function PageHeader({ modelAccuracy }) {
+  const accuracy = modelAccuracy ?? 84.3;
   return (
     <section className="flex items-start justify-between gap-8">
       <div className="max-w-3xl">
@@ -287,7 +329,7 @@ function PageHeader() {
           </p>
           <div className="mt-1 flex items-center gap-2">
             <span className="text-lg font-extrabold tracking-[-0.02em] text-primary">
-              <AnimatedInlineNumber value={84.3} suffix="%" decimals={1} />
+              <AnimatedInlineNumber value={accuracy} suffix="%" decimals={1} />
             </span>
             <span className="inline-flex items-center gap-1 rounded-badge bg-success-light px-2 py-0.5 text-[10px] font-extrabold text-success">
               <TrendingUp className="h-3 w-3" />
@@ -315,7 +357,6 @@ function PageHeader() {
           </p>
         </div>
       </div>
-
     </section>
   );
 }
@@ -330,7 +371,7 @@ function PredictionMapSkeleton() {
     </section>
   );
 }
-function PredictionCards() {
+function PredictionCards({ predictions }) {
   const [alerted, setAlerted] = useState({});
   const toast = useToast();
 
@@ -347,13 +388,15 @@ function PredictionCards() {
     toast.info("Report exported", `${locationShortName(prediction.location_name)} prediction report is ready.`);
   }
 
-  if (mockPredictions.length === 0) {
+  const list = predictions ?? mockPredictions;
+
+  if (list.length === 0) {
     return <NoPredictions />;
   }
 
   return (
     <section className="grid grid-cols-3 gap-6">
-      {mockPredictions.map((prediction) => (
+      {list.map((prediction) => (
         <PredictionCard
           key={prediction.id}
           prediction={prediction}
@@ -587,7 +630,19 @@ function AccuracyTooltip({ active, payload, label }) {
   );
 }
 
-function RecurringIssuesPanel() {
+function RecurringIssuesPanel({ predictions }) {
+  const data = useMemo(() => {
+    if (!predictions || predictions.length === 0) return recurringHotspots;
+    return predictions
+      .filter((p) => !isPlaceholderArea(p.location_name))
+      .map((p) => ({
+        location: locationShortName(p.location_name),
+        count: p.historical_complaint_count,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+  }, [predictions]);
+
   return (
     <section className="rounded-card bg-white p-6 shadow-card">
       <div className="flex items-center justify-between">
@@ -606,7 +661,7 @@ function RecurringIssuesPanel() {
       </div>
       <div className="mt-6 h-[300px]">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={recurringHotspots} layout="vertical" margin={{ top: 8, right: 40, left: 32, bottom: 8 }}>
+          <BarChart data={data} layout="vertical" margin={{ top: 8, right: 40, left: 32, bottom: 8 }}>
             <defs>
               <linearGradient id="recurring-bar-fill" x1="0%" y1="0%" x2="100%" y2="0%">
                 <stop offset="0%" stopColor="#1B4FD8" />

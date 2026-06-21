@@ -31,6 +31,27 @@ const departmentAliases = {
   "Electricity Dept": "Electricity Department",
 };
 
+function searchableComplaintText(complaint) {
+  return [
+    complaint.id,
+    complaint.ticket,
+    complaint.ticket_id,
+    complaint.complaint_id,
+    complaint.title,
+    complaint.issue,
+    complaint.issue_type,
+    complaint.location,
+    complaint.location_name,
+    complaint.department,
+    normalizeDepartmentFilter(complaint.department),
+    complaint.status,
+    complaint.description,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
 function wait(ms = CONFIG.MOCK_DELAY) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -76,13 +97,13 @@ async function safeJson(response) {
   }
 }
 
-async function request(path, { method = "GET", body, headers, query } = {}) {
+async function request(path, { method = "GET", body, headers, query, timeoutMs = CONFIG.TIMEOUT_MS } = {}) {
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, CONFIG.TIMEOUT_MS);
+  }, timeoutMs);
 
   try {
     const response = await fetch(endpoint(path, query), {
@@ -215,6 +236,7 @@ export async function analyzeComplaint(text, location = "Rajiv Chowk, New Delhi"
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, location }),
+    timeoutMs: 45000,
   });
 }
 
@@ -235,6 +257,7 @@ export async function analyzeImage(imageFile) {
   return request("/api/analyze-image", {
     method: "POST",
     body: formData,
+    timeoutMs: 30000,
   });
 }
 
@@ -258,6 +281,7 @@ export async function submitComplaint(payload) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: 30000,
   });
 }
 
@@ -285,6 +309,29 @@ export async function getDashboardStats() {
   return request("/api/dashboard/stats");
 }
 
+export async function getHeatmap({ highPriority = false } = {}) {
+  if (shouldUseMock()) {
+    return mockResponse({
+      geojson: {
+        type: "FeatureCollection",
+        features: [],
+      },
+      heatmap_points: mockComplaintStore.map((complaint) => ({
+        complaint_id: complaint.id ?? complaint.ticket_id,
+        latitude: complaint.latitude ?? complaint.lat,
+        longitude: complaint.longitude ?? complaint.lng,
+        priority_score: complaint.priority_score,
+        weight: Math.max(0.3, Math.min(1, Number(complaint.priority_score ?? 50) / 100)),
+        issue_type: complaint.issue_type,
+        location: complaint.location_name ?? complaint.location,
+      })),
+      area_counts: [],
+    });
+  }
+
+  return request(highPriority ? "/heatmap/high-priority" : "/heatmap");
+}
+
 export async function getComplaints(filters = {}) {
   if (shouldUseMock()) {
     return mockResponse(() => {
@@ -306,16 +353,7 @@ export async function getComplaints(filters = {}) {
       if (filters.search) {
         const search = String(filters.search).toLowerCase();
         filtered = filtered.filter((complaint) =>
-          [
-            complaint.ticket_id,
-            complaint.issue_type,
-            complaint.location_name,
-            complaint.department,
-            complaint.description,
-          ]
-            .join(" ")
-            .toLowerCase()
-            .includes(search),
+          searchableComplaintText(complaint).includes(search),
         );
       }
 

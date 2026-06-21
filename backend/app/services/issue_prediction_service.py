@@ -4,10 +4,9 @@ from datetime import datetime
 from decimal import Decimal
 
 import numpy as np
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.feature_extraction import DictVectorizer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -48,18 +47,30 @@ class IssuePredictionService:
                 ),
             )
 
-        predictions = self._ml_predictions(history, payload)
-        return IssuePredictionResponse(
-            predictions=predictions,
-            model_used="scikit-learn random-forest pipeline",
-            training_records=len(history),
-            horizon_days=payload.horizon_days,
-            explanation=(
+        try:
+            predictions = self._ml_predictions(history, payload)
+            model_used = "scikit-learn random-forest pipeline"
+            explanation = (
                 "The engine groups historical complaints by area, issue type, and "
                 "month, predicts future density with a RandomForestRegressor, predicts "
                 "dominant issue type with a RandomForestClassifier, then combines "
                 "predicted density, severity, and recurrence into a 0-100 risk score."
-            ),
+            )
+        except Exception:
+            predictions = self._fallback_predictions(history, payload.limit)
+            model_used = "aggregation-fallback"
+            explanation = (
+                "Historical rows were available, but the ML training set was too sparse "
+                "or inconsistent for this runtime, so risks were calculated from "
+                "recurrence, severity, and complaint density."
+            )
+
+        return IssuePredictionResponse(
+            predictions=predictions,
+            model_used=model_used,
+            training_records=len(history),
+            horizon_days=payload.horizon_days,
+            explanation=explanation,
         )
 
     def _fetch_history(self, db: Session) -> list[HistoricalComplaint]:
@@ -215,23 +226,9 @@ class IssuePredictionService:
         return sorted(predictions, key=lambda item: item.risk_score, reverse=True)[:limit]
 
     def _density_model(self) -> Pipeline:
-        preprocessor = ColumnTransformer(
-            transformers=[
-                (
-                    "categorical",
-                    OneHotEncoder(handle_unknown="ignore"),
-                    ["area", "issue_type"],
-                ),
-                (
-                    "numeric",
-                    "passthrough",
-                    ["month_index", "recent_count", "average_severity"],
-                ),
-            ]
-        )
         return Pipeline(
             steps=[
-                ("preprocessor", preprocessor),
+                ("vectorizer", DictVectorizer(sparse=False)),
                 (
                     "model",
                     RandomForestRegressor(
@@ -244,19 +241,9 @@ class IssuePredictionService:
         )
 
     def _issue_model(self) -> Pipeline:
-        preprocessor = ColumnTransformer(
-            transformers=[
-                ("categorical", OneHotEncoder(handle_unknown="ignore"), ["area"]),
-                (
-                    "numeric",
-                    "passthrough",
-                    ["month_index", "total_count", "average_severity"],
-                ),
-            ]
-        )
         return Pipeline(
             steps=[
-                ("preprocessor", preprocessor),
+                ("vectorizer", DictVectorizer(sparse=False)),
                 (
                     "model",
                     RandomForestClassifier(

@@ -57,6 +57,82 @@ def create_app() -> FastAPI:
     from sqlalchemy.orm import Session
     from app.db.session import get_db
 
+    placeholder_values = {"", "string", "null", "undefined", "none", "n/a", "other", "unknown"}
+
+    def clean_text(value) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        if cleaned.lower() in placeholder_values:
+            return None
+        return cleaned
+
+    def decimal_or_none(value) -> Decimal | None:
+        if value is None or value == "":
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    def float_or_none(value):
+        return float(value) if value is not None else None
+
+    def detected_issue_from_image(image_analysis: dict | None) -> str | None:
+        if not image_analysis:
+            return None
+        detected = image_analysis.get("detected_issue") or image_analysis.get("detected_issue_type")
+        if not detected:
+            detected_issues = image_analysis.get("detected_issues")
+            if isinstance(detected_issues, list) and detected_issues:
+                detected = detected_issues[0]
+        return clean_text(detected)
+
+    def confidence_from_payload(payload: dict | None) -> Decimal | None:
+        if not payload:
+            return None
+        return decimal_or_none(payload.get("confidence") or payload.get("confidence_score"))
+
+    def infer_location_from_text(value) -> str | None:
+        import re
+
+        text = clean_text(value)
+        if not text:
+            return None
+
+        summary_match = re.search(
+            r"Issue Summary:\s*(.+?)(?:\n\s*\n|Impact on Citizens:|Urgency Level:|$)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        search_text = summary_match.group(1).strip() if summary_match else text
+        normalized = re.sub(r"\s+", " ", search_text).strip()
+        lowered = normalized.lower()
+
+        landmarks = [
+            ("rajiv chowk metro", "Rajiv Chowk Metro Station"),
+            ("rajiv chowk gate 4", "Rajiv Chowk Gate 4"),
+            ("rajiv chowk", "Rajiv Chowk, New Delhi"),
+            ("india gate", "India Gate, New Delhi"),
+            ("bangla sahib", "Bangla Sahib Road, New Delhi"),
+            ("central park", "Central Park, New Delhi"),
+        ]
+        for needle, label in landmarks:
+            if needle in lowered:
+                return label
+
+        pattern = re.search(
+            r"\b(?:near|at|beside|around|opposite)\s+(.+?)(?:\s+(?:causing|with|and|is|has|ke pass|near)|[.,;]|$)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if pattern:
+            candidate = clean_text(pattern.group(1))
+            if candidate:
+                return candidate[:80].strip()
+
+        return None
+
     @app.post("/api/analyze-complaint")
     async def api_analyze_complaint(
         payload: dict,
@@ -67,9 +143,10 @@ def create_app() -> FastAPI:
         nlp_svc = NLPIntegrationService()
         req = NLPAnalysisRequest(complaint_text=payload.get("text", ""))
         nlp_res = await nlp_svc.analyze_and_store(db, req)
+        resolved_location = clean_text(nlp_res.location) or clean_text(payload.get("location"))
         return {
             "issue_type": nlp_res.issue_type,
-            "location": nlp_res.location,
+            "location": resolved_location,
             "urgency": nlp_res.urgency,
             "department": nlp_res.department,
             "formal_complaint": nlp_res.formal_complaint,
@@ -132,14 +209,21 @@ def create_app() -> FastAPI:
             severity_score = Decimal(str(image_analysis.get("severity_score") or "0.00"))
             
         # Count similar complaints nearby
-        issue_type = payload.get("issue_type") or "other"
-        location = payload.get("location")
+        issue_type = (
+            clean_text(payload.get("issue_type"))
+            or detected_issue_from_image(image_analysis)
+            or "Civic Issue"
+        )
+        location = clean_text(payload.get("location") or payload.get("location_text"))
+        latitude = Decimal(str(payload["latitude"])) if payload.get("latitude") is not None else None
+        longitude = Decimal(str(payload["longitude"])) if payload.get("longitude") is not None else None
+
         similar_nearby = workflow_svc._count_similar_complaints(
             db,
             issue_type=issue_type,
             location=location,
-            latitude=None,
-            longitude=None
+            latitude=latitude,
+            longitude=longitude
         )
         
         # Calculate priority
@@ -154,7 +238,7 @@ def create_app() -> FastAPI:
         )
         persistent_priority = priority_svc.to_persistent_score(priority_response)
         
-        complaint_id = uuid4()
+        complaint_id = UUID(str(payload["complaint_id"])) if payload.get("complaint_id") else uuid4()
         
         # Move temp image to final destination if present
         image_url = None
@@ -173,44 +257,57 @@ def create_app() -> FastAPI:
         dept_name = payload.get("department")
         department = workflow_svc._get_or_create_department(db, dept_name)
         
-        complaint = Complaint(
-            id=complaint_id,
-            title=issue_type,
-            description=payload.get("formal_complaint") or payload.get("complaint_text") or "",
-            issue_type=issue_type,
-            location_text=location,
-            image_url=image_url,
-            assigned_department_id=department.id if department else None,
-            status_id=status.id,
-            submitted_at=datetime.now(UTC)
-        )
+        complaint = db.get(Complaint, complaint_id)
+        if complaint is None:
+            complaint = Complaint(
+                id=complaint_id,
+                submitted_at=datetime.now(UTC)
+            )
+
+        complaint.title = issue_type
+        complaint.description = payload.get("formal_complaint") or payload.get("complaint_text") or ""
+        complaint.issue_type = issue_type
+        complaint.location_text = location
+        complaint.latitude = latitude
+        complaint.longitude = longitude
+        complaint.image_url = image_url or complaint.image_url
+        complaint.assigned_department_id = department.id if department else None
+        complaint.status_id = status.id
         
-        complaint.ai_analysis = AIAnalysisResult(
-            extracted_issue_type=issue_type,
-            extracted_location=location,
-            urgency_level=urgency_level,
-            raw_response=payload,
-            confidence_score=Decimal("95.00"),
-            model_name="external-nlp-service",
-            model_version="v1"
-        )
+        if complaint.ai_analysis is None:
+            complaint.ai_analysis = AIAnalysisResult()
+
+        complaint.ai_analysis.extracted_issue_type = issue_type
+        complaint.ai_analysis.extracted_location = location
+        complaint.ai_analysis.urgency_level = urgency_level
+        complaint.ai_analysis.raw_response = payload
+        complaint.ai_analysis.confidence_score = decimal_or_none(payload.get("confidence_score")) or Decimal("0.95")
+        complaint.ai_analysis.model_name = "external-nlp-service"
+        complaint.ai_analysis.model_version = "v1"
         
         if image_analysis:
-            det_issue = image_analysis.get("detected_issues", ["unknown"])[0]
-            complaint.image_analysis = ImageAnalysisResult(
-                detected_issue_type=det_issue,
-                severity_score=severity_score,
-                confidence_score=Decimal(str(image_analysis.get("confidence") or "0.00")),
-                damage_level=workflow_svc._damage_level(severity_score),
-                objects_detected={"detected": image_analysis.get("detected_issues")},
-                raw_response=image_analysis,
-                model_name="external-cv-service",
-                model_version="v1"
-            )
+            det_issue = detected_issue_from_image(image_analysis) or "Civic Issue"
+            detected_issues = image_analysis.get("detected_issues")
+            if not isinstance(detected_issues, list) or not detected_issues:
+                detected_issues = [det_issue]
+            if complaint.image_analysis is None:
+                complaint.image_analysis = ImageAnalysisResult()
+            complaint.image_analysis.detected_issue_type = det_issue
+            complaint.image_analysis.severity_score = severity_score
+            complaint.image_analysis.confidence_score = confidence_from_payload(image_analysis) or Decimal("0.00")
+            complaint.image_analysis.damage_level = workflow_svc._damage_level(severity_score)
+            complaint.image_analysis.objects_detected = {"detected": detected_issues}
+            complaint.image_analysis.raw_response = image_analysis
+            complaint.image_analysis.model_name = "external-cv-service"
+            complaint.image_analysis.model_version = "v1"
             
-        complaint.priority_score = PriorityScore(
-            **persistent_priority.model_dump()
-        )
+        if complaint.priority_score is None:
+            complaint.priority_score = PriorityScore(
+                **persistent_priority.model_dump()
+            )
+        else:
+            for field, value in persistent_priority.model_dump().items():
+                setattr(complaint.priority_score, field, value)
         
         db.add(complaint)
         db.commit()
@@ -231,38 +328,93 @@ def create_app() -> FastAPI:
         search: str | None = None,
         db: Session = Depends(get_db)
     ):
-        from sqlalchemy import select, func
+        from sqlalchemy import select, func, cast, String, or_
         from app.models.complaint import Complaint
         from app.models.complaint_status import ComplaintStatus
         from app.models.department import Department
         from app.models.priority_score import PriorityScore
         from sqlalchemy.orm import selectinload
         
-        stmt = select(Complaint).options(
+        stmt = select(Complaint).outerjoin(
+            Department, Department.id == Complaint.assigned_department_id
+        ).outerjoin(
+            ComplaintStatus, ComplaintStatus.id == Complaint.status_id
+        ).options(
             selectinload(Complaint.status),
+            selectinload(Complaint.assigned_department),
             selectinload(Complaint.ai_analysis),
             selectinload(Complaint.image_analysis),
             selectinload(Complaint.priority_score),
         )
         
         if department and department != "All":
-            stmt = stmt.join(Complaint.assigned_department).where(
-                func.lower(Department.name) == department.lower()
+            department_lower = department.lower()
+            department_aliases = {
+                "pwd": ["pwd", "public works department", "public_works_department"],
+                "municipal": ["municipal", "municipal sanitation department", "municipal_sanitation_department", "municipal corporation", "municipal_corporation"],
+                "water dept": ["water dept", "water_dept", "delhi jal board", "delhi_jal_board"],
+                "utility dept": ["utility dept", "utility_dept", "electricity department", "electricity_department"],
+                "electricity dept": ["electricity dept", "electricity_dept", "electricity department", "electricity_department"],
+            }
+            department_matches = department_aliases.get(department_lower, [department_lower])
+            stmt = stmt.where(
+                or_(
+                    func.lower(Department.name).in_(department_matches),
+                    func.lower(Department.code).in_(department_matches),
+                )
             )
             
         if status and status != "All" and status != "Status":
-            stmt = stmt.join(Complaint.status).where(
+            stmt = stmt.where(
                 func.lower(ComplaintStatus.code) == status.lower()
             )
             
         if search:
-            search_lower = f"%{search.lower()}%"
-            stmt = stmt.where(
-                func.lower(Complaint.description).like(search_lower) |
-                func.lower(Complaint.title).like(search_lower) |
-                func.lower(Complaint.issue_type).like(search_lower) |
-                func.lower(Complaint.location_text).like(search_lower)
-            )
+            search_lower = search.lower().strip()
+            search_like = f"%{search_lower}%"
+            search_code = search_lower.replace(" ", "_").replace("-", "_")
+            search_code_like = f"%{search_code}%"
+            
+            conditions = [
+                func.lower(Complaint.description).like(search_like),
+                func.lower(Complaint.title).like(search_like),
+                func.lower(Complaint.issue_type).like(search_like),
+                func.lower(Complaint.location_text).like(search_like),
+                cast(Complaint.id, String).like(search_like),
+                func.lower(Department.name).like(search_like),
+                func.lower(Department.code).like(search_code_like),
+                func.lower(ComplaintStatus.name).like(search_like),
+                func.lower(ComplaintStatus.code).like(search_code_like),
+            ]
+            
+            # Map "works", "public", "pwd" to PWD
+            if any(x in search_lower for x in ["works", "public", "pwd"]):
+                conditions.append(func.lower(Department.code) == "pwd")
+                conditions.append(func.lower(Department.name) == "pwd")
+            
+            # Map "sanitation", "garbage", "mcd", "municipal" to Municipal Corporation
+            if any(x in search_lower for x in ["sanitation", "garbage", "mcd", "municipal"]):
+                conditions.append(func.lower(Department.code) == "municipal_corporation")
+                conditions.append(func.lower(Department.name) == "municipal corporation")
+
+            # Map public-facing department labels to their stored civic department names/codes
+            if any(x in search_lower for x in ["water", "jal", "water dept"]):
+                conditions.append(func.lower(Department.code).in_(["water_dept", "delhi_jal_board"]))
+                conditions.append(func.lower(Department.name).like("%jal%"))
+
+            if any(x in search_lower for x in ["utility", "electric", "electricity"]):
+                conditions.append(func.lower(Department.code).in_(["utility_dept", "electricity_department"]))
+                conditions.append(func.lower(Department.name).like("%electric%"))
+                
+            # Map "pending", "open", "active" to processing/submitted/assigned/in_progress
+            if any(x in search_lower for x in ["pending", "open", "active"]):
+                conditions.append(func.lower(ComplaintStatus.code).in_(["submitted", "processing", "assigned", "in_progress"]))
+                conditions.append(func.lower(ComplaintStatus.name).in_(["submitted", "processing", "assigned", "in_progress"]))
+
+            if "progress" in search_lower:
+                conditions.append(func.lower(ComplaintStatus.code) == "in_progress")
+            
+            stmt = stmt.where(or_(*conditions))
             
         total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
         
@@ -274,19 +426,47 @@ def create_app() -> FastAPI:
         
         mapped_complaints = []
         for comp in complaints:
+            ai_analysis = comp.ai_analysis
+            image_analysis = comp.image_analysis
+            priority_score = comp.priority_score
+            ai_issue_type = clean_text(ai_analysis.extracted_issue_type if ai_analysis else None)
+            ai_location = clean_text(ai_analysis.extracted_location if ai_analysis else None)
+            image_issue_type = clean_text(image_analysis.detected_issue_type if image_analysis else None)
+            issue_type = clean_text(comp.issue_type) or ai_issue_type or image_issue_type
+            location = clean_text(comp.location_text) or ai_location or infer_location_from_text(comp.description)
             mapped_complaints.append({
                 "ticket_id": str(comp.id),
                 "complaint_id": comp.id,
-                "title": comp.title,
+                "title": clean_text(comp.title) or issue_type or "Civic Issue",
                 "description": comp.description,
-                "issue_type": comp.issue_type,
-                "location": comp.location_text,
+                "issue_type": issue_type,
+                "location": location,
                 "latitude": float(comp.latitude) if comp.latitude else None,
                 "longitude": float(comp.longitude) if comp.longitude else None,
                 "image_url": comp.image_url,
                 "status": comp.status.name if comp.status else "Submitted",
-                "priority_score": float(comp.priority_score.final_score) if comp.priority_score else None,
-                "created_at": comp.created_at.isoformat()
+                "priority_score": float(priority_score.final_score) if priority_score else None,
+                "priority_level": priority_score.priority_level.value if priority_score else None,
+                "severity_score": float_or_none(image_analysis.severity_score if image_analysis else None),
+                "detected_issue": image_issue_type,
+                "created_at": comp.created_at.isoformat(),
+                "department": comp.assigned_department.name if comp.assigned_department else None,
+                "ai_analysis": {
+                    "issue_type": ai_issue_type,
+                    "extracted_issue_type": ai_issue_type,
+                    "location": ai_location,
+                    "extracted_location": ai_location,
+                    "urgency": ai_analysis.urgency_level.value if ai_analysis and ai_analysis.urgency_level else None,
+                    "confidence_score": float_or_none(ai_analysis.confidence_score if ai_analysis else None),
+                } if ai_analysis else None,
+                "image_analysis": {
+                    "detected_issue": image_issue_type,
+                    "detected_issue_type": image_issue_type,
+                    "severity_score": float_or_none(image_analysis.severity_score if image_analysis else None),
+                    "confidence": float_or_none(image_analysis.confidence_score if image_analysis else None),
+                    "confidence_score": float_or_none(image_analysis.confidence_score if image_analysis else None),
+                    "damage_level": image_analysis.damage_level.value if image_analysis and image_analysis.damage_level else None,
+                } if image_analysis else None,
             })
             
         return {
@@ -317,6 +497,13 @@ def create_app() -> FastAPI:
         if not updated:
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail="Complaint not found")
+        if db_status == "resolved":
+            from app.models.complaint import Complaint
+            complaint = db.get(Complaint, complaint_id)
+            if complaint and complaint.resolved_at is None:
+                complaint.resolved_at = datetime.now(UTC)
+                db.add(complaint)
+                db.commit()
             
         return updated
 
@@ -358,6 +545,21 @@ def create_app() -> FastAPI:
                 .where(Complaint.created_at >= day_start).where(Complaint.created_at < day_end)
                 .where(ComplaintStatus.code == "resolved")
             ) or 0
+            day_response = db.scalar(
+                select(
+                    func.avg(
+                        func.extract(
+                            "epoch",
+                            Complaint.resolved_at - Complaint.created_at,
+                        )
+                    ) / 3600
+                )
+                .join(ComplaintStatus, ComplaintStatus.id == Complaint.status_id)
+                .where(Complaint.resolved_at >= day_start)
+                .where(Complaint.resolved_at < day_end)
+                .where(ComplaintStatus.code == "resolved")
+                .where(Complaint.resolved_at.is_not(None))
+            )
             
             day_name = day_start.strftime("%a")
             sparkline_data.append({
@@ -365,7 +567,7 @@ def create_app() -> FastAPI:
                 "total": day_total,
                 "critical": day_critical,
                 "resolved": day_resolved,
-                "response": float(round(Decimal("3.4") + Decimal(str(offset % 5)) * Decimal("0.28"), 1))
+                "response": float(round(Decimal(str(day_response)), 1)) if day_response is not None else None,
             })
             
         dept_stats = []
@@ -386,6 +588,20 @@ def create_app() -> FastAPI:
                 .join(PriorityScore)
                 .where(PriorityScore.final_score >= Decimal("70.00"))
             ) or 0
+            dept_avg_response = db.scalar(
+                select(
+                    func.avg(
+                        func.extract(
+                            "epoch",
+                            Complaint.resolved_at - Complaint.created_at,
+                        )
+                    ) / 3600
+                )
+                .where(Complaint.assigned_department_id == dept.department_id)
+                .join(ComplaintStatus, ComplaintStatus.id == Complaint.status_id)
+                .where(ComplaintStatus.code == "resolved")
+                .where(Complaint.resolved_at.is_not(None))
+            )
             
             dept_stats.append({
                 "id": dept_id,
@@ -393,14 +609,14 @@ def create_app() -> FastAPI:
                 "count": dept_total,
                 "resolved": dept_resolved,
                 "critical": dept_critical,
-                "time": 4.5
+                "time": float(round(Decimal(str(dept_avg_response)), 1)) if dept_avg_response is not None else None,
             })
             
         return {
             "total_today": total_today,
             "critical": metrics.high_priority_complaints,
             "resolved": metrics.resolved_complaints,
-            "avg_response_hours": float(metrics.average_resolution_time_hours) if metrics.average_resolution_time_hours else 4.8,
+            "avg_response_hours": float(metrics.average_resolution_time_hours) if metrics.average_resolution_time_hours else None,
             "sparkline_data": sparkline_data,
             "departments": dept_stats
         }

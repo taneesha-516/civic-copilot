@@ -43,6 +43,8 @@ import { Button } from "@/components/design-system/Button";
 import { Card } from "@/components/design-system/Card";
 import { StatusTimeline } from "@/components/design-system/StatusTimeline";
 import { useComplaints } from "@/src/contexts/ComplaintsContext";
+import { analyzeComplaint, analyzeImage, submitComplaint as submitComplaintApi } from "@/src/services/api";
+import { getErrorMessage } from "@/src/utils/errorHandler";
 
 const MAX_CHARACTERS = 500;
 const MIN_CHARACTERS = 30;
@@ -173,9 +175,9 @@ function getImageDimensions(file) {
 
 export default function ComplaintSubmission({
   embedded = false,
-  onClose,
-  onAuthorityLogin,
-  onSubmitted,
+  onClose = undefined,
+  onAuthorityLogin = undefined,
+  onSubmitted = undefined,
 }) {
   const { addComplaint } = useComplaints();
   const [lang, setLang] = useState("en");
@@ -184,6 +186,7 @@ export default function ComplaintSubmission({
   const [complaint, setComplaint] = useState("");
   const [locationStatus, setLocationStatus] = useState("detecting");
   const [location, setLocation] = useState("");
+  const [detectedCoordinates, setDetectedCoordinates] = useState(null);
   const [manualLocation, setManualLocation] = useState("");
   const [photo, setPhoto] = useState(null);
   const [photoUrl, setPhotoUrl] = useState("");
@@ -256,6 +259,7 @@ export default function ComplaintSubmission({
       (position) => {
         if (cancelled) return;
         const { latitude, longitude } = position.coords;
+        setDetectedCoordinates({ latitude, longitude });
         setLocation(`Near Rajiv Chowk, New Delhi (${latitude.toFixed(3)}, ${longitude.toFixed(3)})`);
         setLocationStatus("detected");
       },
@@ -365,25 +369,55 @@ export default function ComplaintSubmission({
     setSubmitting(true);
   }
 
-  function completeProcessing() {
-    const createdComplaint = addComplaint({
-      description: complaint.trim(),
-      location: resolvedLocation || "Rajiv Chowk, New Delhi",
-      issueType: "Pothole",
-      urgency: "HIGH",
-      severityScore: photo ? 8 : 7,
-      hasPhoto: Boolean(photo),
-    });
+  async function completeProcessing() {
+    const finalLocation = resolvedLocation || "Rajiv Chowk, New Delhi";
 
-    setSubmittedComplaint(createdComplaint);
-    setSubmittedAt(nowTime());
-    setSubmitted(true);
-    setSubmitting(false);
-    onSubmitted?.(createdComplaint);
     try {
-      window.localStorage.removeItem(DRAFT_KEY);
-    } catch {
-      // Ignore private browsing storage failures.
+      const textAnalysis = await analyzeComplaint(complaint.trim(), finalLocation);
+      const imageAnalysis = photo ? await analyzeImage(photo) : null;
+      const savedComplaint = await submitComplaintApi({
+        complaint_id: textAnalysis.complaint_id,
+        complaint_text: complaint.trim(),
+        issue_type: textAnalysis.issue_type,
+        location: textAnalysis.location || finalLocation,
+        latitude: detectedCoordinates?.latitude,
+        longitude: detectedCoordinates?.longitude,
+        urgency: textAnalysis.urgency,
+        department: textAnalysis.department,
+        formal_complaint: textAnalysis.formal_complaint,
+        image_analysis: imageAnalysis,
+      });
+
+      const createdComplaint = addComplaint({
+        description: complaint.trim(),
+        location: textAnalysis.location || finalLocation,
+        issueType: textAnalysis.issue_type,
+        urgency: textAnalysis.urgency,
+        severityScore: imageAnalysis?.severity_score ?? (photo ? 8 : 7),
+        hasPhoto: Boolean(photo),
+        ticketId: savedComplaint.ticket_id,
+        department: savedComplaint.assigned_department ?? textAnalysis.department,
+        formalComplaint: textAnalysis.formal_complaint,
+      });
+
+      const submittedRecord = {
+        ...createdComplaint,
+        ticket_id: savedComplaint.ticket_id ?? createdComplaint.ticket_id,
+      };
+
+      setSubmittedComplaint(submittedRecord);
+      setSubmittedAt(nowTime());
+      setSubmitted(true);
+      setSubmitting(false);
+      onSubmitted?.(submittedRecord);
+      try {
+        window.localStorage.removeItem(DRAFT_KEY);
+      } catch {
+        // Ignore private browsing storage failures.
+      }
+    } catch (error) {
+      setSubmitting(false);
+      setSubmissionError(`Submission paused: ${getErrorMessage(error)} Please retry when the service is reachable.`);
     }
   }
 

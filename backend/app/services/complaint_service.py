@@ -132,7 +132,10 @@ class ComplaintService:
 
         updates = payload.model_dump(exclude_unset=True)
         if "status" in updates:
-            complaint.status_id = self._get_status_by_code(db, updates.pop("status")).id
+            status_code = updates.pop("status")
+            complaint.status_id = self._get_status_by_code(db, status_code).id
+            if status_code and status_code.strip().lower().replace(" ", "_") == "resolved":
+                complaint.resolved_at = complaint.resolved_at or datetime.now(UTC)
         if "location" in updates:
             complaint.location_text = updates.pop("location")
         if "priority_score" in updates:

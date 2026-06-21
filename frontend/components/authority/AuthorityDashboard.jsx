@@ -24,13 +24,14 @@ import {
   Grid3X3,
   Lightbulb,
   ListChecks,
-  Map,
+  Map as MapIcon,
   MapPin,
   MoreHorizontal,
   Plus,
   RefreshCcw,
   Search,
   Settings,
+  TimerReset,
   Truck,
   Trash2,
   TrendingUp,
@@ -38,13 +39,21 @@ import {
   Zap,
 } from "lucide-react";
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import {
   Line,
   LineChart,
   ResponsiveContainer,
   XAxis,
   YAxis,
+  BarChart,
+  Bar,
+  Tooltip,
+  Legend,
+  CartesianGrid,
+  AreaChart,
+  Area,
+  Cell,
 } from "recharts";
 import { Badge } from "@/components/design-system/Badge";
 import { Button } from "@/components/design-system/Button";
@@ -53,12 +62,13 @@ import { ToastProvider, useToast } from "@/components/design-system/ToastSystem"
 import { PredictionsWorkspace } from "@/components/authority/PredictionsPage";
 import ComplaintSubmission from "@/components/citizen/ComplaintSubmission";
 import { useComplaints } from "@/src/contexts/ComplaintsContext";
+import { CONFIG, getComplaints, getDashboardStats, getHeatmap, getPredictions } from "@/src/services/api";
 import { useCountUp } from "@/src/hooks/useCountUp";
 
 const navItems = [
   { label: "Overview", page: "overview", icon: Grid3X3 },
   { label: "Complaints", page: "complaints", icon: ListChecks, badge: "127" },
-  { label: "Heatmap", page: "heatmap", icon: Map },
+  { label: "Heatmap", page: "heatmap", icon: MapIcon },
   { label: "Departments", page: "departments", icon: Building2 },
   { label: "Predictions", page: "predictions", icon: TrendingUp, badge: "NEW", badgeTone: "amber" },
   { label: "Analytics", page: "analytics", icon: BarChart3 },
@@ -268,42 +278,241 @@ const complaints = [
 
 const departmentNameToId = {
   "Public Works Department": "PWD",
+  PWD: "PWD",
   "Delhi Jal Board": "Water Dept",
   "Electricity Department": "Utility Dept",
   "Municipal Sanitation Department": "Municipal",
+  "Municipal Corporation": "Municipal",
 };
 
 function normalizeMockComplaint(complaint, index) {
   const departmentId = departmentNameToId[complaint.department] ?? complaint.department;
-  const priorityScore = Math.max(1, Math.min(96, Math.round(complaint.priority_score ?? complaint.priorityScore ?? 50)));
+  const rawTicket = String(
+    complaint.rawTicket ??
+      complaint.raw_ticket ??
+      complaint.ticket_id ??
+      complaint.ticket ??
+      complaint.complaint_id ??
+      "",
+  );
+  const aiAnalysis = complaint.ai_analysis ?? {};
+  const imageAnalysis = complaint.image_analysis ?? {};
+  const rawSeverityScore = firstMeaningfulValue(
+    complaint.severity_score,
+    complaint.severityScore,
+    imageAnalysis.severity_score,
+  );
+  const severityScore = normalizeNumericScore(rawSeverityScore);
+  const priorityScore = normalizePriorityScore(
+    firstMeaningfulValue(complaint.priority_score, complaint.priorityScore),
+    severityScore,
+  );
+  const issue = normalizeIssueLabel(
+    firstMeaningfulValue(
+      complaint.issue,
+      complaint.issue_type,
+      aiAnalysis.issue_type,
+      aiAnalysis.extracted_issue_type,
+      imageAnalysis.detected_issue,
+      imageAnalysis.detected_issue_type,
+      complaint.detected_issue,
+      complaint.title,
+    ),
+  );
+  const location = normalizeLocationLabel(
+    firstMeaningfulValue(
+      complaint.location,
+      complaint.location_name,
+      complaint.location_text,
+      aiAnalysis.location,
+      aiAnalysis.extracted_location,
+      inferLocationFromText(complaint.description ?? complaint.text ?? complaint.formal_complaint),
+    ),
+  );
+  const severity = normalizeSeverityLabel(complaint.severity, severityScore ?? priorityScore);
+  const submittedAt = firstMeaningfulValue(complaint.submitted_at, complaint.created_at);
 
   return {
     ...complaint,
     rank: index + 1,
-    ticket: complaint.ticket ?? complaint.ticket_id,
-    issue: complaint.issue ?? complaint.issue_type,
-    type: complaint.type === "electrical" ? "electricity" : complaint.type,
+    ticket: formatTicketId(rawTicket, index),
+    rawTicket,
+    issue,
+    type: normalizeIssueType(complaint.type, issue, departmentId),
     department: departmentId,
     departmentName: complaint.department,
-    location: complaint.location ?? complaint.location_name,
+    location,
     lat: complaint.lat ?? complaint.latitude,
     lng: complaint.lng ?? complaint.longitude,
     photo: complaint.photo ?? complaint.photo_url,
     text: complaint.text ?? complaint.description,
     formalComplaint: complaint.formal_complaint,
+    submitted_at: submittedAt,
+    submitted: complaint.submitted ?? formatSubmittedTime(submittedAt),
     priorityScore,
-    severityScore: complaint.severity_score,
-    confidence: complaint.ai_analysis?.confidence_score
-      ? Math.round(complaint.ai_analysis.confidence_score * 100)
-      : undefined,
+    severity,
+    severityScore,
+    confidence: normalizeConfidenceScore(
+      firstMeaningfulValue(
+        aiAnalysis.confidence_score,
+        imageAnalysis.confidence,
+        imageAnalysis.confidence_score,
+        complaint.confidence,
+      ),
+    ),
   };
+}
+
+function isPlaceholderValue(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return !normalized || ["string", "null", "undefined", "none", "n/a", "other"].includes(normalized);
+}
+
+function firstMeaningfulValue(...values) {
+  return values.find((value) => !isPlaceholderValue(value));
+}
+
+function formatTicketId(value, index = 0) {
+  const ticket = String(value ?? "").trim();
+  if (/^CCP-\d{4}$/i.test(ticket)) return ticket.toUpperCase();
+
+  const uuidHex = ticket.replace(/-/g, "");
+  if (/^[a-f0-9]{32}$/i.test(uuidHex)) {
+    const numericId = (Number.parseInt(uuidHex.slice(0, 8), 16) % 9000) + 1000;
+    return `CCP-${numericId}`;
+  }
+
+  if (ticket && !isPlaceholderValue(ticket)) return ticket;
+  return `CCP-${String(index + 1).padStart(4, "0")}`;
+}
+
+function normalizeNumericScore(value) {
+  if (value === null || value === undefined || value === "") return undefined;
+  const score = Number(value);
+  if (!Number.isFinite(score)) return undefined;
+  return Math.max(0, Math.min(100, score));
+}
+
+function normalizePriorityScore(value, fallbackSeverityScore) {
+  const score = normalizeNumericScore(value);
+  if (score !== undefined) return Math.round(score);
+  if (fallbackSeverityScore !== undefined) return Math.round(fallbackSeverityScore);
+  return 0;
+}
+
+function normalizeConfidenceScore(value) {
+  const confidence = normalizeNumericScore(value);
+  if (confidence === undefined) return undefined;
+  return Math.round(confidence <= 1 ? confidence * 100 : confidence);
+}
+
+function normalizeSeverityLabel(value, score = 0) {
+  if (!isPlaceholderValue(value)) return String(value).toLowerCase();
+  if (score >= 85) return "critical";
+  if (score >= 65) return "high";
+  if (score >= 40) return "medium";
+  return "low";
+}
+
+function formatSubmittedTime(value) {
+  if (isPlaceholderValue(value)) return "N/A";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "N/A";
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function normalizeIssueLabel(value) {
+  if (!isPlaceholderValue(value)) return value;
+  return "Civic Issue";
+}
+
+function normalizeLocationLabel(value) {
+  return isPlaceholderValue(value) ? "Unknown" : value;
+}
+
+function inferLocationFromText(value) {
+  if (isPlaceholderValue(value)) return undefined;
+
+  const summaryMatch = String(value).match(/Issue Summary:\s*([\s\S]*?)(?:\n\s*\n|Impact on Citizens:|Urgency Level:|$)/i);
+  const text = (summaryMatch?.[1] ?? String(value)).replace(/\s+/g, " ").trim();
+  const lowered = text.toLowerCase();
+  const landmarks = [
+    ["rajiv chowk metro", "Rajiv Chowk Metro Station"],
+    ["rajiv chowk gate 4", "Rajiv Chowk Gate 4"],
+    ["rajiv chowk", "Rajiv Chowk, New Delhi"],
+    ["india gate", "India Gate, New Delhi"],
+    ["bangla sahib", "Bangla Sahib Road, New Delhi"],
+    ["central park", "Central Park, New Delhi"],
+  ];
+  const landmark = landmarks.find(([needle]) => lowered.includes(needle));
+  if (landmark) return landmark[1];
+
+  const locationMatch = text.match(/\b(?:near|at|beside|around|opposite)\s+(.+?)(?:\s+(?:causing|with|and|is|has|ke pass|near)|[.,;]|$)/i);
+  return locationMatch?.[1]?.trim().slice(0, 80);
+}
+
+function normalizeIssueType(type, issue, departmentId) {
+  if (type === "electrical") return "electricity";
+  if (!isPlaceholderValue(type)) return type;
+  if (departmentId === "PWD") return "road";
+  if (departmentId === "Municipal") return "sanitation";
+  if (departmentId === "Water Dept") return "water";
+  if (departmentId === "Utility Dept") return "electricity";
+  return String(issue ?? "civic").toLowerCase();
 }
 
 function normalizeComplaintsForDashboard(sourceComplaints) {
   return sourceComplaints
     .map(normalizeMockComplaint)
+    .filter((complaint) => !isUnknownLocation(complaint.location))
     .sort((first, second) => second.priorityScore - first.priorityScore)
     .map((complaint, index) => ({ ...complaint, rank: index + 1 }));
+}
+
+function isUnknownLocation(value) {
+  return String(value ?? "").trim().toLowerCase() === "unknown";
+}
+
+function useDebouncedValue(value, delay = 250) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => window.clearTimeout(timer);
+  }, [delay, value]);
+
+  return debouncedValue;
+}
+
+function complaintSearchText(complaint) {
+  return [
+    complaint.id,
+    complaint.ticket,
+    complaint.ticket_id,
+    complaint.complaint_id,
+    complaint.title,
+    complaint.issue,
+    complaint.issue_type,
+    complaint.type,
+    complaint.location,
+    complaint.location_name,
+    complaint.department,
+    complaint.departmentName,
+    departmentDisplayName(complaint),
+    complaint.status,
+    complaint.description,
+    complaint.text,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 }
 
 const issueIconMap = {
@@ -355,7 +564,7 @@ function percentWidthClass(value) {
   return percentWidthClassMap[value] ?? "w-full";
 }
 
-function Sparkline({ dataKey, color }) {
+function Sparkline({ dataKey, color, data }) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -367,7 +576,7 @@ function Sparkline({ dataKey, color }) {
     <div className="h-9 w-20">
       {mounted ? (
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={sparklineData}>
+          <LineChart data={data ?? sparklineData}>
             <XAxis dataKey="day" hide />
             <YAxis hide />
             <Line
@@ -397,7 +606,7 @@ function AnimatedStatValue({ value, suffix = "", decimals = 0, className, delay 
   );
 }
 
-export default function AuthorityDashboard({ onNewComplaint }) {
+export default function AuthorityDashboard({ onNewComplaint = undefined }) {
   return (
     <ToastProvider>
       <AuthorityDashboardContent onNewComplaint={onNewComplaint} />
@@ -405,8 +614,8 @@ export default function AuthorityDashboard({ onNewComplaint }) {
   );
 }
 
-function AuthorityDashboardContent({ onNewComplaint }) {
-  const { complaints: sharedComplaints, totalComplaints } = useComplaints();
+function AuthorityDashboardContent({ onNewComplaint = undefined }) {
+  const { complaints: sharedComplaints } = useComplaints();
   const [activePage, setActivePage] = useState("overview");
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -414,7 +623,67 @@ function AuthorityDashboardContent({ onNewComplaint }) {
   const [selectedComplaint, setSelectedComplaint] = useState(null);
   const [focusedComplaint, setFocusedComplaint] = useState(null);
   const [submissionOpen, setSubmissionOpen] = useState(false);
+  const [dashboardSearchTerm, setDashboardSearchTerm] = useState("");
   const toast = useToast();
+
+  const [dbComplaints, setDbComplaints] = useState([]);
+  const [statsData, setStatsData] = useState(null);
+  const [predictionsData, setPredictionsData] = useState(null);
+  const [heatmapData, setHeatmapData] = useState(null);
+  const [dbLoading, setDbLoading] = useState(!CONFIG.MOCK_MODE);
+  const [dbError, setDbError] = useState(null);
+
+  const fetchDbData = useCallback(async () => {
+    setRefreshing(true);
+    setDbError(null);
+    try {
+      const [compResult, statsResult, predResult, heatmapResult] = await Promise.allSettled([
+        getComplaints(),
+        getDashboardStats(),
+        getPredictions(),
+        getHeatmap(),
+      ]);
+
+      if (compResult.status === "rejected") {
+        throw compResult.reason;
+      }
+      if (statsResult.status === "rejected") {
+        throw statsResult.reason;
+      }
+
+      const compRes = compResult.value;
+      const statsRes = statsResult.value;
+      setDbComplaints(compRes.complaints ?? []);
+      setStatsData(statsRes);
+      setPredictionsData(predResult.status === "fulfilled" ? predResult.value : null);
+      setHeatmapData(heatmapResult.status === "fulfilled" ? heatmapResult.value : null);
+
+      if (predResult.status === "rejected" || heatmapResult.status === "rejected") {
+        console.warn("Loaded core dashboard data; optional map/prediction data failed.", {
+          predictions: predResult.status === "rejected" ? predResult.reason : null,
+          heatmap: heatmapResult.status === "rejected" ? heatmapResult.reason : null,
+        });
+      }
+    } catch (err) {
+      console.error("Failed to load backend database data:", err);
+      setDbError(err);
+      toast.error("Database connection failure", "Could not sync dashboard with backend service.");
+    } finally {
+      setDbLoading(false);
+      setRefreshing(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+    if (!CONFIG.MOCK_MODE) {
+      fetchDbData();
+    } else {
+      setDbLoading(false);
+    }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchDbData]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDashboardLoading(false), 1050);
@@ -422,9 +691,12 @@ function AuthorityDashboardContent({ onNewComplaint }) {
   }, []);
 
   const allComplaints = useMemo(() => {
+    if (!CONFIG.MOCK_MODE) {
+      return normalizeComplaintsForDashboard(dbComplaints);
+    }
     const normalized = normalizeComplaintsForDashboard(sharedComplaints);
     return normalized.length > 0 ? normalized : complaints;
-  }, [sharedComplaints]);
+  }, [dbComplaints, sharedComplaints]);
 
   const filteredComplaints = useMemo(() => {
     const pool =
@@ -435,11 +707,15 @@ function AuthorityDashboardContent({ onNewComplaint }) {
   }, [allComplaints, departmentFilter]);
 
   function refreshData() {
-    setRefreshing(true);
-    window.setTimeout(() => {
-      setRefreshing(false);
-      toast.info(`${pageTitles[activePage]} refreshed`, "Latest Delhi complaint feed is synced.");
-    }, 900);
+    if (!CONFIG.MOCK_MODE) {
+      fetchDbData();
+    } else {
+      setRefreshing(true);
+      window.setTimeout(() => {
+        setRefreshing(false);
+        toast.info(`${pageTitles[activePage]} refreshed`, "Latest Delhi complaint feed is synced.");
+      }, 900);
+    }
   }
 
   function openComplaintsForDepartment(departmentId) {
@@ -447,11 +723,18 @@ function AuthorityDashboardContent({ onNewComplaint }) {
     setActivePage("complaints");
   }
 
+  function updateDashboardSearch(value) {
+    setDashboardSearchTerm(value);
+    if (value.trim()) {
+      setActivePage("complaints");
+    }
+  }
+
   return (
     <main className="min-h-screen bg-[#F1F5F9] text-text-primary">
       <Sidebar
         activePage={activePage}
-        totalComplaints={totalComplaints}
+        totalComplaints={allComplaints.length}
         onPageChange={setActivePage}
       />
       <TopHeader
@@ -459,9 +742,16 @@ function AuthorityDashboardContent({ onNewComplaint }) {
         refreshing={refreshing}
         onRefresh={refreshData}
         onNewComplaint={onNewComplaint ?? (() => setSubmissionOpen(true))}
+        searchTerm={dashboardSearchTerm}
+        onSearchChange={updateDashboardSearch}
       />
 
       <section className="min-h-screen pl-[240px] pt-[68px]">
+        {dbError ? (
+          <div className="px-6 pt-6">
+            <DatabaseStatusBanner error={dbError} refreshing={refreshing} onRetry={fetchDbData} />
+          </div>
+        ) : null}
         <AnimatePresence mode="wait">
           <motion.div
             key={activePage}
@@ -470,10 +760,8 @@ function AuthorityDashboardContent({ onNewComplaint }) {
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
           >
-            {dashboardLoading && activePage === "overview" ? (
-              <div className="space-y-6 p-6">
-                <DashboardLoadingState />
-              </div>
+            {(dashboardLoading || dbLoading) ? (
+              <DashboardLoadingFrame activePage={activePage} />
             ) : (
               <DashboardPageRenderer
                 activePage={activePage}
@@ -485,6 +773,12 @@ function AuthorityDashboardContent({ onNewComplaint }) {
                 onFocusComplaint={setFocusedComplaint}
                 onOpenComplaint={setSelectedComplaint}
                 focusedComplaint={focusedComplaint}
+                statsData={statsData}
+                predictionsData={predictionsData}
+                heatmapData={heatmapData}
+                searchTerm={dashboardSearchTerm}
+                onSearchTermChange={setDashboardSearchTerm}
+                dbError={dbError}
               />
             )}
           </motion.div>
@@ -511,8 +805,12 @@ function AuthorityDashboardContent({ onNewComplaint }) {
             <ComplaintSubmission
               embedded
               onClose={() => setSubmissionOpen(false)}
-              onSubmitted={() => {
+              onSubmitted={async () => {
+                setSubmissionOpen(false);
                 setActivePage("complaints");
+                if (!CONFIG.MOCK_MODE) {
+                  await fetchDbData();
+                }
               }}
             />
           </motion.div>
@@ -532,12 +830,21 @@ function DashboardPageRenderer({
   onFocusComplaint,
   onOpenComplaint,
   focusedComplaint,
+  statsData,
+  predictionsData,
+  heatmapData,
+  searchTerm,
+  onSearchTermChange,
+  dbError,
 }) {
   if (activePage === "complaints") {
     return (
       <ComplaintsPage
         complaints={allComplaints}
         onOpenComplaint={onOpenComplaint}
+        searchTerm={searchTerm}
+        onSearchTermChange={onSearchTermChange}
+        dbError={dbError}
       />
     );
   }
@@ -547,20 +854,21 @@ function DashboardPageRenderer({
       <HeatmapPage
         focusedComplaint={focusedComplaint}
         complaints={allComplaints}
+        heatmapData={heatmapData}
       />
     );
   }
 
   if (activePage === "departments") {
-    return <DepartmentsPage onDepartmentDrilldown={onDepartmentDrilldown} />;
+    return <DepartmentsPage onDepartmentDrilldown={onDepartmentDrilldown} statsData={statsData} />;
   }
 
   if (activePage === "predictions") {
-    return <PredictionsWorkspace />;
+    return <PredictionsWorkspace predictionsData={predictionsData} />;
   }
 
   if (activePage === "analytics") {
-    return <AnalyticsPage />;
+    return <AnalyticsPage statsData={statsData} allComplaints={allComplaints} />;
   }
 
   return (
@@ -573,6 +881,9 @@ function DashboardPageRenderer({
       onOpenComplaint={onOpenComplaint}
       focusedComplaint={focusedComplaint}
       allComplaints={allComplaints}
+      statsData={statsData}
+      heatmapData={heatmapData}
+      dbError={dbError}
     />
   );
 }
@@ -586,14 +897,18 @@ function OverviewPage({
   onFocusComplaint,
   onOpenComplaint,
   focusedComplaint,
+  statsData,
+  heatmapData,
+  dbError,
 }) {
   return (
     <div className="space-y-6 p-6">
-      <StatsGrid totalComplaints={allComplaints.length} />
+      <AiCommandBrief complaints={allComplaints} statsData={statsData} dbError={dbError} />
+      <StatsGrid totalComplaints={allComplaints.length} allComplaints={allComplaints} statsData={statsData} />
 
       <section className="grid h-[480px] grid-cols-[minmax(0,60fr)_minmax(360px,40fr)] gap-6">
-        <DelhiHeatMap focusedComplaint={focusedComplaint} complaintPoints={allComplaints} />
-        <DepartmentPanel onFilter={onDepartmentDrilldown} />
+        <DelhiHeatMap focusedComplaint={focusedComplaint} complaintPoints={allComplaints} heatmapData={heatmapData} />
+        <DepartmentPanel onFilter={onDepartmentDrilldown} statsData={statsData} />
       </section>
 
       <PriorityQueue
@@ -607,12 +922,19 @@ function OverviewPage({
   );
 }
 
-function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
+function ComplaintsPage({
+  complaints: allComplaints,
+  onOpenComplaint,
+  searchTerm: externalSearchTerm = "",
+  onSearchTermChange,
+  dbError,
+}) {
   const [departmentFilter, setDepartmentFilter] = useState("All");
   const [statusFilter, setStatusFilter] = useState("All");
   const [severityFilter, setSeverityFilter] = useState("All");
   const [dateRange, setDateRange] = useState("all");
-  const [searchTerm, setSearchTerm] = useState("");
+  const searchTerm = externalSearchTerm;
+  const debouncedSearchTerm = useDebouncedValue(searchTerm);
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedTickets, setSelectedTickets] = useState([]);
   const toast = useToast();
@@ -648,7 +970,7 @@ function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
   ];
 
   const filteredComplaints = useMemo(() => {
-    const normalizedSearch = searchTerm.trim().toLowerCase();
+    const normalizedSearch = debouncedSearchTerm.trim().toLowerCase();
 
     return allComplaints.filter((complaint) => {
       const matchesDepartment =
@@ -657,22 +979,13 @@ function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
       const matchesSeverity =
         severityFilter === "All" || complaint.severity === severityFilter;
       const matchesDate = complaintWithinDateRange(complaint, dateRange);
-      const searchableText = [
-        complaint.ticket,
-        complaint.issue,
-        complaint.location,
-        complaint.departmentName,
-        complaint.description,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
+      const searchableText = complaintSearchText(complaint);
       const matchesSearch =
         normalizedSearch.length === 0 || searchableText.includes(normalizedSearch);
 
       return matchesDepartment && matchesStatus && matchesSeverity && matchesDate && matchesSearch;
     });
-  }, [allComplaints, dateRange, departmentFilter, searchTerm, severityFilter, statusFilter]);
+  }, [allComplaints, dateRange, debouncedSearchTerm, departmentFilter, severityFilter, statusFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredComplaints.length / perPage));
   const pageStart = (currentPage - 1) * perPage;
@@ -707,7 +1020,7 @@ function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
   }
 
   function updateSearchTerm(value) {
-    setSearchTerm(value);
+    onSearchTermChange?.(value);
     resetTablePosition();
   }
 
@@ -716,7 +1029,7 @@ function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
     setStatusFilter("All");
     setSeverityFilter("All");
     setDateRange("all");
-    setSearchTerm("");
+    onSearchTermChange?.("");
   }
 
   function toggleTicket(ticket) {
@@ -782,13 +1095,20 @@ function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
   return (
     <DashboardPageShell
       title="All Complaints"
-      description="Search, filter, inspect, and bulk-manage every seeded Civic Copilot complaint across Delhi."
+      description="Search, filter, inspect, and bulk-manage database-backed Civic Copilot complaints across Delhi."
       action={
         <span className="rounded-badge bg-primary-light px-3 py-1 text-xs font-extrabold text-primary">
           {allComplaints.length} complaints
         </span>
       }
     >
+      {allComplaints.length === 0 && !dbError ? (
+        <DatabaseEmptyState
+          title="No complaints in the database yet"
+          description="Submit a citizen complaint to show live ticket data, AI triage, department routing, and priority scoring here."
+        />
+      ) : null}
+      {allComplaints.length === 0 && !dbError ? null : (
       <article className="rounded-card bg-white shadow-card">
         <div className="border-b border-border p-6">
           <div className="grid grid-cols-[172px_156px_148px_156px_minmax(220px,1fr)_auto] gap-3">
@@ -821,7 +1141,7 @@ function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
               <input
                 value={searchTerm}
                 onChange={(event) => updateSearchTerm(event.target.value)}
-                placeholder="Search ticket, issue, location..."
+                placeholder="Search ID, department, issue, location, status..."
                 className="min-w-0 flex-1 bg-transparent text-sm font-medium text-text-primary outline-none placeholder:text-text-muted"
               />
             </label>
@@ -901,6 +1221,7 @@ function ComplaintsPage({ complaints: allComplaints, onOpenComplaint }) {
           </>
         )}
       </article>
+      )}
 
       <AnimatePresence>
         {selectedTickets.length > 0 ? (
@@ -993,6 +1314,7 @@ function AllComplaintRow({
           <button
             type="button"
             onClick={copyTicket}
+            title={complaint.rawTicket ? `Database ID: ${complaint.rawTicket}` : complaint.ticket}
             className="font-mono text-sm font-extrabold text-primary underline-offset-4 transition duration-150 ease-in-out hover:underline"
           >
             {complaint.ticket}
@@ -1170,7 +1492,8 @@ function paginationRange(currentPage, totalPages) {
 function complaintWithinDateRange(complaint, dateRange) {
   if (dateRange === "all") return true;
 
-  const submittedAt = new Date(complaint.submitted_at);
+  const submittedAt = new Date(complaint.submitted_at ?? complaint.created_at);
+  if (!Number.isFinite(submittedAt.getTime())) return false;
   const now = new Date();
   const hours =
     dateRange === "24h" ? 24 : dateRange === "3d" ? 72 : 168;
@@ -1201,7 +1524,7 @@ const heatmapAreaStats = [
   { area: "South Delhi", count: 10, tone: "bg-success" },
 ];
 
-function HeatmapPage({ focusedComplaint, complaints: allComplaints }) {
+function HeatmapPage({ focusedComplaint, complaints: allComplaints, heatmapData }) {
   const [departmentFilter, setDepartmentFilter] = useState("All");
   const [severityFilter, setSeverityFilter] = useState("All");
   const [dateDays, setDateDays] = useState(7);
@@ -1238,13 +1561,14 @@ function HeatmapPage({ focusedComplaint, complaints: allComplaints }) {
         </span>
       </section>
 
-      <section className="min-h-0 flex-1">
+      <section className="min-h-0 flex-1 overflow-visible">
         <DelhiHeatMap
           focusedComplaint={focusedComplaint}
           heightClass="h-full"
           className="border-border shadow-elevated"
           showOverviewControls={false}
           complaintPoints={allComplaints}
+          heatmapData={heatmapData}
           categoryFilter={heatmapDepartmentCategoryMap[departmentFilter]}
           severityFilter={severityFilter}
           daysFilter={dateDays}
@@ -1282,7 +1606,7 @@ function HeatmapFilterPanel({
   onDateDays,
 }) {
   return (
-    <aside className="absolute left-4 top-4 z-[820] w-[288px] rounded-card border border-white/70 bg-white/[0.88] p-4 shadow-elevated backdrop-blur-md">
+    <aside className="absolute left-3 top-3 z-[1300] w-[min(288px,calc(100%-1.5rem))] overflow-visible rounded-card border border-white/70 bg-white/[0.92] p-4 shadow-elevated backdrop-blur-md sm:left-4 sm:top-4 max-[900px]:p-3">
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-[10px] font-extrabold uppercase tracking-[0.12em] text-text-muted">
@@ -1293,11 +1617,11 @@ function HeatmapFilterPanel({
           </h2>
         </div>
         <div className="grid h-10 w-10 place-items-center rounded-[12px] bg-primary-light text-primary">
-          <Map className="h-5 w-5" />
+          <MapIcon className="h-5 w-5" />
         </div>
       </div>
 
-      <div className="mt-4 space-y-3">
+      <div className="mt-4 space-y-3 max-[900px]:mt-3 max-[900px]:space-y-2">
         <div>
           <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.08em] text-text-muted">
             Department
@@ -1320,7 +1644,7 @@ function HeatmapFilterPanel({
             widthClass="w-full"
           />
         </div>
-        <div className="rounded-[12px] border border-border bg-white/80 p-3">
+        <div className="rounded-[12px] border border-border bg-white/80 p-3 max-[900px]:p-2.5">
           <div className="flex items-center justify-between">
             <p className="text-[10px] font-bold uppercase tracking-[0.08em] text-text-muted">
               Date Range
@@ -1349,7 +1673,7 @@ function HeatmapFilterPanel({
 
 function HeatmapLegendPanel({ showPredictions, onTogglePredictions }) {
   return (
-    <aside className="absolute right-4 top-4 z-[820] w-[288px] rounded-card border border-white/70 bg-white/[0.88] p-4 shadow-elevated backdrop-blur-md">
+    <aside className="absolute right-3 top-3 z-[1100] hidden w-[min(288px,calc(100%-1.5rem))] rounded-card border border-white/70 bg-white/[0.9] p-4 shadow-elevated backdrop-blur-md lg:block sm:right-4 sm:top-4 max-[900px]:p-3">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-[10px] font-extrabold uppercase tracking-[0.12em] text-text-muted">
@@ -1418,7 +1742,7 @@ function HeatmapLegendPanel({ showPredictions, onTogglePredictions }) {
 
 function HeatmapAreaStatsStrip() {
   return (
-    <div className="absolute bottom-4 left-4 z-[820] flex max-w-[calc(100%-120px)] flex-wrap gap-2 rounded-[12px] border border-white/70 bg-white/[0.88] p-2 shadow-elevated backdrop-blur-md">
+    <div className="absolute bottom-3 left-3 z-[1000] hidden max-w-[calc(100%-120px)] flex-wrap gap-2 rounded-[12px] border border-white/70 bg-white/[0.88] p-2 shadow-elevated backdrop-blur-md xl:flex sm:bottom-4 sm:left-4">
       {heatmapAreaStats.map((item) => (
         <div
           key={item.area}
@@ -1437,16 +1761,38 @@ function HeatmapAreaStatsStrip() {
   );
 }
 
-function DepartmentsPage({ onDepartmentDrilldown }) {
+function DepartmentsPage({ onDepartmentDrilldown, statsData }) {
+  const mergedDepartments = useMemo(() => {
+    if (!statsData?.departments) return departments;
+    return departments.map((dept) => {
+      const apiDept = statsData.departments.find(
+        (ad) =>
+          ad.name === dept.name ||
+          ad.name.includes(dept.id) ||
+          (dept.id === "PWD" && ad.name.includes("Public Works")) ||
+          (dept.id === "Water Dept" && ad.name.includes("Jal")) ||
+          (dept.id === "Utility Dept" && ad.name.includes("Electricity")) ||
+          (dept.id === "Municipal" && ad.name.includes("Sanitation"))
+      );
+      return {
+        ...dept,
+        count: apiDept ? apiDept.count : 0,
+        critical: apiDept ? apiDept.critical : 0,
+      };
+    });
+  }, [statsData]);
+
+  const total = mergedDepartments.reduce((sum, item) => sum + item.count, 0) || 1;
+
   return (
     <DashboardPageShell
       title="Department Command"
       description="Monitor workload, critical load, and response ownership across Delhi civic departments."
     >
       <section className="grid grid-cols-2 gap-6">
-        {departments.map((department) => {
+        {mergedDepartments.map((department) => {
           const Icon = department.icon;
-          const width = Math.round((department.count / 127) * 100);
+          const width = Math.round((department.count / total) * 100);
           return (
             <article
               key={department.id}
@@ -1466,10 +1812,7 @@ function DepartmentsPage({ onDepartmentDrilldown }) {
                     </p>
                   </div>
                 </div>
-                <span className="rounded-badge bg-danger-light px-3 py-1 text-xs font-extrabold text-danger">
-                  {department.critical} critical
-                </span>
-              </div>
+            </div>
 
               <div className="mt-6 grid grid-cols-3 gap-3">
                 <DepartmentMiniMetric label="Queue" value={department.count} />
@@ -1504,56 +1847,394 @@ function DepartmentsPage({ onDepartmentDrilldown }) {
   );
 }
 
-function AnalyticsPage() {
+function AnalyticsPage({ statsData, allComplaints }) {
+  const databaseComplaints = useMemo(
+    () => (CONFIG.MOCK_MODE ? [] : allComplaints),
+    [allComplaints],
+  );
+  const databaseStats = useMemo(
+    () => (CONFIG.MOCK_MODE ? null : statsData),
+    [statsData],
+  );
+
+  const totalComplaints = databaseComplaints.length;
+  const resolvedComplaints = databaseStats?.resolved ?? databaseComplaints.filter((complaint) =>
+    String(complaint.status ?? "").toLowerCase() === "resolved"
+  ).length;
+  const pendingComplaints = Math.max(0, totalComplaints - resolvedComplaints);
+  const resolutionPercentage = totalComplaints > 0 ? Math.round((resolvedComplaints / totalComplaints) * 100) : 0;
+  const avgResponseHours = databaseStats?.avg_response_hours ?? null;
+
+  const departmentData = useMemo(() => {
+    if (databaseStats?.departments?.length) {
+      return databaseStats.departments.map((department) => ({
+        name: department.name ?? "Unassigned",
+        count: Number(department.count ?? 0),
+        resolved: Number(department.resolved ?? 0),
+        critical: Number(department.critical ?? 0),
+        time: department.time,
+      }));
+    }
+
+    const grouped = new Map();
+    databaseComplaints.forEach((complaint) => {
+      const name = departmentDisplayName(complaint) || "Unassigned";
+      const current = grouped.get(name) ?? { name, count: 0, resolved: 0, critical: 0, time: null };
+      current.count += 1;
+      if (String(complaint.status ?? "").toLowerCase() === "resolved") current.resolved += 1;
+      if (analyticsPriorityScore(complaint) >= 70) current.critical += 1;
+      grouped.set(name, current);
+    });
+    return Array.from(grouped.values()).sort((first, second) => second.count - first.count);
+  }, [databaseComplaints, databaseStats]);
+
+  const severityData = useMemo(() => {
+    const buckets = [
+      { name: "Critical", count: 0, color: "#EF4444" },
+      { name: "High", count: 0, color: "#F59E0B" },
+      { name: "Medium", count: 0, color: "#3B82F6" },
+      { name: "Low", count: 0, color: "#10B981" },
+    ];
+
+    databaseComplaints.forEach((complaint) => {
+      const explicitSeverity = String(complaint.severity ?? "").toLowerCase();
+      const score = analyticsPriorityScore(complaint);
+      const bucketName =
+        explicitSeverity === "critical" || score >= 90
+          ? "Critical"
+          : explicitSeverity === "high" || score >= 70
+            ? "High"
+            : explicitSeverity === "medium" || score >= 40
+              ? "Medium"
+              : "Low";
+      const bucket = buckets.find((item) => item.name === bucketName);
+      if (bucket) bucket.count += 1;
+    });
+
+    return buckets;
+  }, [databaseComplaints]);
+
+  const dailyVolumeData = useMemo(() => {
+    if (databaseStats?.sparkline_data?.length) {
+      return databaseStats.sparkline_data.map((item) => ({
+        day: item.day,
+        total: Number(item.total ?? 0),
+        resolved: Number(item.resolved ?? 0),
+        critical: Number(item.critical ?? 0),
+        response: item.response,
+      }));
+    }
+
+    return [];
+  }, [databaseStats]);
+
+  const hotspotData = useMemo(() => {
+    const grouped = new Map();
+    databaseComplaints.forEach((complaint) => {
+      const location = complaint.location || "Unknown";
+      const current = grouped.get(location) ?? {
+        location,
+        count: 0,
+        critical: 0,
+        maxPriority: 0,
+      };
+      current.count += 1;
+      const priorityScore = analyticsPriorityScore(complaint);
+      if (priorityScore >= 70) current.critical += 1;
+      current.maxPriority = Math.max(current.maxPriority, priorityScore);
+      grouped.set(location, current);
+    });
+
+    return Array.from(grouped.values())
+      .sort((first, second) => second.count - first.count || second.maxPriority - first.maxPriority)
+      .slice(0, 6);
+  }, [databaseComplaints]);
+
+  const responseTrendData = dailyVolumeData.filter((item) => item.response !== null && item.response !== undefined);
+  const hasDatabaseData = !CONFIG.MOCK_MODE && (databaseStats || totalComplaints > 0);
+
+  if (!hasDatabaseData) {
+    return (
+      <DashboardPageShell
+        title="Analytics Workspace"
+        description="Real-time metrics will appear once the database-backed dashboard APIs return complaint data."
+        action={
+          <span className="rounded-badge bg-accent-50 px-3 py-1 text-xs font-extrabold text-accent">
+            Database only
+          </span>
+        }
+      >
+        <article className="rounded-card border border-border bg-white p-8 text-center shadow-card">
+          <BarChart3 className="mx-auto h-10 w-10 text-text-muted" />
+          <h2 className="mt-4 text-lg font-extrabold text-text-primary">Waiting for database analytics</h2>
+          <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-text-secondary">
+            Analytics is intentionally not using seeded or mock data. Start the backend with PostgreSQL connected to populate this view.
+          </p>
+        </article>
+      </DashboardPageShell>
+    );
+  }
+
   return (
     <DashboardPageShell
-      title="Analytics"
-      description="Cross-department trends, SLA forecasting, and ward-level performance analytics are queued for the next build."
+      title="Analytics Workspace"
+      description="Database-backed complaint volume, department load, severity, SLA, response-time, and hotspot metrics."
       action={
-        <span className="rounded-badge bg-accent-50 px-3 py-1 text-xs font-extrabold text-accent">
-          Coming soon
+        <span className="rounded-badge bg-success-light px-3 py-1 text-xs font-extrabold text-success">
+          Database only
         </span>
       }
     >
-      <section className="overflow-hidden rounded-card bg-white shadow-card">
-        <div className="border-b border-border p-6">
-          <div className="flex items-center justify-between gap-6">
+      <div className="space-y-6">
+        <section className="grid grid-cols-4 gap-6">
+          <AnalyticsMetricCard
+            title="Total Complaints"
+            value={totalComplaints}
+            description="Records loaded from PostgreSQL"
+            icon={FileText}
+            color="text-primary"
+            bg="bg-primary/10"
+          />
+          <AnalyticsMetricCard
+            title="Resolved"
+            value={resolvedComplaints}
+            description={`${resolutionPercentage}% of all complaints`}
+            icon={CheckCircle2}
+            color="text-success"
+            bg="bg-success-light"
+          />
+          <AnalyticsMetricCard
+            title="Pending"
+            value={pendingComplaints}
+            description="Non-resolved complaint queue"
+            icon={Clock3}
+            color="text-accent"
+            bg="bg-accent/10"
+          />
+          <AnalyticsMetricCard
+            title="Avg Response Time"
+            value={avgResponseHours === null ? "N/A" : `${avgResponseHours}h`}
+            description={avgResponseHours === null ? "No resolved timestamp data yet" : "Resolved_at minus created_at"}
+            icon={TimerReset}
+            color="text-danger"
+            bg="bg-danger/10"
+          />
+        </section>
+
+        <div className="grid grid-cols-2 gap-6">
+          <AnalyticsChartCard
+            title="Complaints By Department"
+            description="Total and resolved complaints grouped by assigned department"
+          >
+            <BarChart data={departmentData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+              <XAxis dataKey="name" stroke="#94A3B8" fontSize={10} tickFormatter={(name) => String(name).split(" ")[0]} tickLine={false} />
+              <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} />
+              <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+              <Legend wrapperStyle={{ fontSize: "12px", paddingTop: "10px" }} />
+              <Bar name="Total" dataKey="count" fill="#3B82F6" radius={[4, 4, 0, 0]} barSize={24} />
+              <Bar name="Resolved" dataKey="resolved" fill="#10B981" radius={[4, 4, 0, 0]} barSize={24} />
+            </BarChart>
+          </AnalyticsChartCard>
+
+          <AnalyticsChartCard
+            title="Complaints By Severity"
+            description="Severity derived from stored severity or priority scores"
+          >
+            <BarChart data={severityData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+              <XAxis dataKey="name" stroke="#94A3B8" fontSize={11} tickLine={false} />
+              <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} />
+              <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+              <Bar dataKey="count" radius={[6, 6, 0, 0]} barSize={42}>
+                {severityData.map((entry) => (
+                  <Cell key={entry.name} fill={entry.color} />
+                ))}
+              </Bar>
+            </BarChart>
+          </AnalyticsChartCard>
+        </div>
+
+        <div className="grid grid-cols-2 gap-6">
+          <AnalyticsChartCard
+            title="Daily Complaint Volume"
+            description="Seven-day volume and critical load from the dashboard API"
+          >
+            <AreaChart data={dailyVolumeData}>
+              <defs>
+                <linearGradient id="analyticsTotal" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.24} />
+                  <stop offset="95%" stopColor="#3B82F6" stopOpacity={0} />
+                </linearGradient>
+                <linearGradient id="analyticsCritical" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#EF4444" stopOpacity={0.18} />
+                  <stop offset="95%" stopColor="#EF4444" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+              <XAxis dataKey="day" stroke="#94A3B8" fontSize={11} tickLine={false} />
+              <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} />
+              <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+              <Legend wrapperStyle={{ fontSize: "12px", paddingTop: "10px" }} />
+              <Area name="Total" type="monotone" dataKey="total" stroke="#3B82F6" strokeWidth={2} fill="url(#analyticsTotal)" />
+              <Area name="Critical" type="monotone" dataKey="critical" stroke="#EF4444" strokeWidth={2} fill="url(#analyticsCritical)" />
+            </AreaChart>
+          </AnalyticsChartCard>
+
+          <AnalyticsChartCard
+            title="Resolution Trends"
+            description="Daily resolved complaints from PostgreSQL status data"
+          >
+            <LineChart data={dailyVolumeData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+              <XAxis dataKey="day" stroke="#94A3B8" fontSize={11} tickLine={false} />
+              <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} />
+              <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+              <Legend wrapperStyle={{ fontSize: "12px", paddingTop: "10px" }} />
+              <Line name="Resolved" type="monotone" dataKey="resolved" stroke="#10B981" strokeWidth={2.5} dot={{ r: 3 }} />
+              <Line name="Total" type="monotone" dataKey="total" stroke="#3B82F6" strokeWidth={2} dot={false} />
+            </LineChart>
+          </AnalyticsChartCard>
+        </div>
+
+        <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)] gap-6">
+          <AnalyticsChartCard
+            title="Response Time Metrics"
+            description="Resolved complaint response time by day; blank days have no resolved timestamp data"
+          >
+            {responseTrendData.length ? (
+              <LineChart data={responseTrendData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                <XAxis dataKey="day" stroke="#94A3B8" fontSize={11} tickLine={false} />
+                <YAxis stroke="#94A3B8" fontSize={11} tickLine={false} />
+                <Tooltip contentStyle={{ borderRadius: "12px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                <Line name="Avg hours" type="monotone" dataKey="response" stroke="#F59E0B" strokeWidth={2.5} dot={{ r: 3 }} />
+              </LineChart>
+            ) : (
+              <AnalyticsEmptyState label="No resolved timestamp data yet" />
+            )}
+          </AnalyticsChartCard>
+
+          <article className="rounded-card border border-border bg-white p-6 shadow-card">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-extrabold text-text-primary">SLA Metrics</h3>
+                <p className="mt-1 text-xs leading-5 text-text-muted">Department resolution rate and average response time</p>
+              </div>
+              <span className="rounded-badge bg-primary-light px-2.5 py-1 text-[10px] font-extrabold text-primary">
+                {resolutionPercentage}% resolved
+              </span>
+            </div>
+            <div className="mt-5 space-y-4">
+              {departmentData.map((department) => {
+                const ratio = department.count > 0 ? Math.round((department.resolved / department.count) * 100) : 0;
+                return (
+                  <div key={department.name} className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-3 text-xs font-bold">
+                      <span className="truncate text-text-primary">{department.name}</span>
+                      <span className="shrink-0 text-text-muted">
+                        {ratio}% | {department.time === null || department.time === undefined ? "N/A" : `${department.time}h`}
+                      </span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-badge bg-slate-100">
+                      <div
+                        className={cn(
+                          "h-full rounded-badge",
+                          ratio >= 80 ? "bg-success" : ratio >= 50 ? "bg-primary" : "bg-danger",
+                        )}
+                        style={{ width: `${ratio}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </article>
+        </div>
+
+        <article className="rounded-card border border-border bg-white p-6 shadow-card">
+          <div className="flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-xl font-bold tracking-[-0.02em] text-text-primary">
-                Analytics workspace is being prepared
-              </h2>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
-                This view will combine resolution velocity, ward load, department SLA drift, and repeat-location trends into one executive dashboard.
-              </p>
+              <h3 className="text-base font-extrabold text-text-primary">Hotspot Locations</h3>
+              <p className="mt-1 text-xs leading-5 text-text-muted">Top locations by complaint count from the database feed</p>
             </div>
-            <div className="grid h-14 w-14 place-items-center rounded-[14px] bg-primary-light text-primary">
-              <BarChart3 className="h-7 w-7" />
-            </div>
+            <MapPin className="h-5 w-5 text-primary" />
           </div>
-        </div>
-        <div className="grid grid-cols-[1fr_340px] gap-6 p-6">
-          <div className="rounded-card border border-border bg-background p-5">
-            <div className="flex h-[260px] items-end gap-3">
-              {[44, 62, 51, 76, 68, 84, 72, 91, 78, 88, 95, 82].map((height, index) => (
-                <div key={index} className="flex flex-1 items-end">
-                  <div
-                    className={cn(
-                      "w-full rounded-t-button bg-gradient-to-t from-primary to-[#60A5FA]",
-                      percentHeightClass(height),
-                    )}
-                  />
+          <div className="mt-5 grid grid-cols-3 gap-3">
+            {hotspotData.length ? hotspotData.map((hotspot) => (
+              <div key={hotspot.location} className="rounded-button border border-border bg-background p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="min-w-0 truncate text-sm font-extrabold text-text-primary">{hotspot.location}</p>
+                  <span className="rounded-badge bg-danger-light px-2 py-0.5 text-[10px] font-extrabold text-danger">
+                    {hotspot.critical} critical
+                  </span>
                 </div>
-              ))}
-            </div>
+                <div className="mt-3 flex items-end justify-between">
+                  <div>
+                    <p className="text-2xl font-extrabold text-primary">{hotspot.count}</p>
+                    <p className="text-[11px] font-semibold text-text-muted">complaints</p>
+                  </div>
+                  <p className="font-mono text-xs font-bold text-text-secondary">max {Math.round(hotspot.maxPriority)}</p>
+                </div>
+              </div>
+            )) : (
+              <div className="col-span-3">
+                <AnalyticsEmptyState label="No hotspot locations available" />
+              </div>
+            )}
           </div>
-          <div className="space-y-3">
-            <AnalyticsPreviewMetric label="SLA prediction" value="87%" tone="primary" />
-            <AnalyticsPreviewMetric label="Repeat hotspots" value="14" tone="danger" />
-            <AnalyticsPreviewMetric label="Resolved trend" value="+22%" tone="success" />
-          </div>
-        </div>
-      </section>
+        </article>
+      </div>
     </DashboardPageShell>
+  );
+}
+
+function analyticsPriorityScore(complaint) {
+  const storedScore =
+    complaint.priority_score ??
+    complaint.priorityScore ??
+    complaint.severity_score ??
+    complaint.severityScore ??
+    complaint.image_analysis?.severity_score;
+  return storedScore === null || storedScore === undefined ? 0 : Number(storedScore);
+}
+
+function AnalyticsChartCard({ title, description, children }) {
+  return (
+    <article className="rounded-card border border-border bg-white p-6 shadow-card">
+      <div className="mb-4">
+        <h3 className="text-base font-extrabold text-text-primary">{title}</h3>
+        <p className="mt-1 text-xs leading-5 text-text-muted">{description}</p>
+      </div>
+      <div className="h-[280px] w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          {children}
+        </ResponsiveContainer>
+      </div>
+    </article>
+  );
+}
+
+function AnalyticsEmptyState({ label }) {
+  return (
+    <div className="flex h-full min-h-[220px] items-center justify-center rounded-card border border-dashed border-border bg-background text-sm font-semibold text-text-muted">
+      {label}
+    </div>
+  );
+}
+
+function AnalyticsMetricCard({ title, value, description, icon: Icon, color, bg }) {
+  return (
+    <article className="rounded-card border border-border bg-white p-6 shadow-card flex items-center justify-between gap-4">
+      <div>
+        <p className="text-xs font-bold uppercase tracking-[0.08em] text-text-muted">{title}</p>
+        <p className="mt-2 text-3xl font-extrabold tracking-[-0.03em] text-text-primary">{value}</p>
+        <p className="mt-1.5 text-xs text-text-secondary">{description}</p>
+      </div>
+      <div className={cn("grid h-12 w-12 place-items-center rounded-[14px]", bg)}>
+        <Icon className={cn("h-6 w-6", color)} />
+      </div>
+    </article>
   );
 }
 
@@ -1576,6 +2257,112 @@ function DashboardPageShell({ title, description, action, children }) {
   );
 }
 
+function DatabaseStatusBanner({ error, refreshing, onRetry }) {
+  const message = error?.userMessage ?? error?.message ?? "The dashboard could not reach the database-backed API.";
+
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-card border border-danger/20 bg-danger-light p-4 shadow-card">
+      <div className="flex gap-3">
+        <span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-button bg-white text-danger shadow-card">
+          <AlertTriangle className="h-4 w-4" />
+        </span>
+        <div>
+          <p className="text-sm font-extrabold text-text-primary">Live data connection needs attention</p>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-text-secondary">
+            {message} Existing UI remains available, but judges will see the strongest demo once PostgreSQL and FastAPI are reachable.
+          </p>
+        </div>
+      </div>
+      <Button
+        size="sm"
+        variant="ghost"
+        leftIcon={<RefreshCcw className={cn("h-4 w-4", refreshing && "animate-spin")} />}
+        onClick={onRetry}
+        className="shrink-0 text-danger hover:bg-white"
+      >
+        Retry
+      </Button>
+    </div>
+  );
+}
+
+function DatabaseEmptyState({ title, description }) {
+  return (
+    <article className="rounded-card border border-dashed border-border bg-white p-10 text-center shadow-card">
+      <div className="mx-auto grid h-14 w-14 place-items-center rounded-[16px] bg-primary-light text-primary">
+        <FileText className="h-7 w-7" />
+      </div>
+      <h2 className="mt-5 text-lg font-extrabold text-text-primary">{title}</h2>
+      <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-text-secondary">{description}</p>
+      <div className="mx-auto mt-6 grid max-w-2xl grid-cols-3 gap-3">
+        {[
+          ["NLP triage", "Issue, location, urgency"],
+          ["CV severity", "Image confidence score"],
+          ["Priority queue", "Department-ready routing"],
+        ].map(([label, detail]) => (
+          <div key={label} className="rounded-button border border-border bg-background p-3">
+            <p className="text-xs font-extrabold text-text-primary">{label}</p>
+            <p className="mt-1 text-[11px] leading-4 text-text-muted">{detail}</p>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function AiCommandBrief({ complaints, statsData, dbError }) {
+  const total = complaints.length;
+  const highPriority = statsData?.critical ?? complaints.filter((complaint) => analyticsPriorityScore(complaint) >= 70).length;
+  const routedDepartments = new Set(complaints.map((complaint) => departmentDisplayName(complaint)).filter(Boolean)).size;
+  const topComplaint = complaints[0];
+  const topDepartment = topComplaint ? departmentDisplayName(topComplaint) : "Awaiting data";
+
+  return (
+    <section className="grid grid-cols-[minmax(0,1.35fr)_repeat(3,minmax(150px,0.55fr))] gap-4">
+      <article className="rounded-card border border-primary/15 bg-white p-5 shadow-card">
+        <div className="flex items-start justify-between gap-5">
+          <div>
+            <p className="text-[11px] font-extrabold uppercase tracking-[0.1em] text-primary">AI Command Brief</p>
+            <h2 className="mt-2 text-xl font-extrabold tracking-[-0.02em] text-text-primary">
+              {dbError ? "Reconnect live data to unlock triage" : "Triage narrative ready for field action"}
+            </h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-text-secondary">
+              {dbError
+                ? "The interface keeps operators oriented while the backend reconnects, with a visible retry path for demo recovery."
+                : `${total} complaints are classified, routed, and ranked. Highest visible case routes to ${topDepartment} with an AI-backed priority decision.`}
+            </p>
+          </div>
+          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-[14px] bg-primary-light text-primary">
+            <Zap className="h-6 w-6" />
+          </span>
+        </div>
+      </article>
+      <AiBriefMetric label="High priority" value={highPriority} detail="Priority >= 70" tone="danger" />
+      <AiBriefMetric label="Departments" value={routedDepartments} detail="Auto-routed queues" tone="primary" />
+      <AiBriefMetric label="Top case" value={topComplaint ? Math.round(analyticsPriorityScore(topComplaint)) : "N/A"} detail="Priority score" tone="accent" />
+    </section>
+  );
+}
+
+function AiBriefMetric({ label, value, detail, tone }) {
+  const toneClass =
+    tone === "danger"
+      ? "bg-danger-light text-danger"
+      : tone === "accent"
+        ? "bg-accent-50 text-accent"
+        : "bg-primary-light text-primary";
+
+  return (
+    <article className="rounded-card border border-border bg-white p-5 shadow-card">
+      <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-text-muted">{label}</p>
+      <p className="mt-3 text-3xl font-extrabold tracking-[-0.03em] text-text-primary">{value}</p>
+      <span className={cn("mt-4 inline-flex rounded-badge px-2.5 py-1 text-[10px] font-extrabold", toneClass)}>
+        {detail}
+      </span>
+    </article>
+  );
+}
+
 function DepartmentMiniMetric({ label, value }) {
   return (
     <div className="rounded-button border border-border bg-background p-3">
@@ -1587,45 +2374,6 @@ function DepartmentMiniMetric({ label, value }) {
       </p>
     </div>
   );
-}
-
-function AnalyticsPreviewMetric({ label, value, tone }) {
-  return (
-    <div className="rounded-card border border-border bg-white p-4 shadow-card">
-      <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-text-muted">
-        {label}
-      </p>
-      <p
-        className={cn(
-          "mt-2 text-3xl font-extrabold tracking-[-0.03em]",
-          tone === "danger" && "text-danger",
-          tone === "success" && "text-success",
-          tone === "primary" && "text-primary",
-        )}
-      >
-        {value}
-      </p>
-    </div>
-  );
-}
-
-const percentHeightClassMap = {
-  44: "h-[44%]",
-  51: "h-[51%]",
-  62: "h-[62%]",
-  68: "h-[68%]",
-  72: "h-[72%]",
-  76: "h-[76%]",
-  78: "h-[78%]",
-  82: "h-[82%]",
-  84: "h-[84%]",
-  88: "h-[88%]",
-  91: "h-[91%]",
-  95: "h-[95%]",
-};
-
-function percentHeightClass(value) {
-  return percentHeightClassMap[value] ?? "h-full";
 }
 
 function Sidebar({ activePage, totalComplaints, onPageChange }) {
@@ -1721,7 +2469,14 @@ function Sidebar({ activePage, totalComplaints, onPageChange }) {
   );
 }
 
-function TopHeader({ title, refreshing, onRefresh, onNewComplaint }) {
+function TopHeader({
+  title,
+  refreshing,
+  onRefresh,
+  onNewComplaint,
+  searchTerm = "",
+  onSearchChange,
+}) {
   return (
     <header className="fixed left-[240px] right-0 top-0 z-30 h-[68px] bg-white shadow-[0_1px_0_#E2E8F0]">
       <div className="flex h-full items-center justify-between px-6">
@@ -1746,6 +2501,8 @@ function TopHeader({ title, refreshing, onRefresh, onNewComplaint }) {
           <label className="group relative flex h-10 w-[320px] items-center gap-2 rounded-button border-[1.5px] border-transparent bg-[#F1F5F9] px-3 transition duration-150 ease-in-out focus-within:border-primary focus-within:bg-white">
             <Search className="h-4 w-4 text-slate-400 transition duration-150 ease-in-out group-focus-within:text-primary" />
             <input
+              value={searchTerm}
+              onChange={(event) => onSearchChange?.(event.target.value)}
               placeholder="Search complaints, tickets, locations..."
               className="min-w-0 flex-1 bg-transparent text-sm text-text-primary outline-none placeholder:text-text-muted"
             />
@@ -1784,10 +2541,15 @@ function TopHeader({ title, refreshing, onRefresh, onNewComplaint }) {
   );
 }
 
-function StatsGrid({ totalComplaints = 127 }) {
+function StatsGrid({ totalComplaints = 127, allComplaints = [], statsData }) {
+  const resolvedCount = statsData?.resolved ?? allComplaints.filter((complaint) =>
+    String(complaint.status ?? "").toLowerCase() === "resolved"
+  ).length;
+  const activeCount = Math.max(0, totalComplaints - resolvedCount);
+  const avgResponse = statsData?.avg_response_hours;
   const stats = [
     {
-      label: "Total Complaints Today",
+      label: "Total Complaints",
       value: totalComplaints,
       icon: FileText,
       iconClass: "text-primary",
@@ -1796,13 +2558,13 @@ function StatsGrid({ totalComplaints = 127 }) {
       pattern: true,
       spark: "total",
       sparkColor: "#64748B",
-      trend: "12% from yesterday",
+      trend: "Live database queue",
       trendTone: "positive",
       trendIcon: "up",
     },
     {
       label: "Critical Priority",
-      value: 14,
+      value: statsData?.critical ?? 14,
       icon: AlertTriangle,
       iconClass: "text-danger",
       iconBgClass: "bg-danger/[0.12]",
@@ -1815,30 +2577,30 @@ function StatsGrid({ totalComplaints = 127 }) {
       trendIcon: "alert",
     },
     {
-      label: "Resolved Today",
-      value: 43,
+      label: "Active Queue",
+      value: activeCount,
       icon: CheckCircle2,
       iconClass: "text-success",
       iconBgClass: "bg-success/[0.12]",
       cardClass: "border-l-[3px] border-l-success bg-success-light",
       spark: "resolved",
       sparkColor: "#16A34A",
-      trend: "34% resolution rate",
+      trend: `${resolvedCount} resolved`,
       trendTone: "positive",
       trendIcon: "up",
     },
     {
       label: "Avg Response Time",
-      value: 3.2,
-      suffix: " hrs",
-      decimals: 1,
+      value: avgResponse ?? "N/A",
+      suffix: avgResponse === null || avgResponse === undefined ? "" : " hrs",
+      decimals: avgResponse === null || avgResponse === undefined ? 0 : 1,
       icon: Clock3,
       iconClass: "text-primary",
       iconBgClass: "bg-primary/[0.12]",
       cardClass: "border-l-[3px] border-l-primary bg-white",
       spark: "response",
       sparkColor: "#1B4FD8",
-      trend: "0.8 hrs vs last week",
+      trend: avgResponse === null || avgResponse === undefined ? "No resolved timestamp data yet" : "Resolved_at minus created_at",
       trendTone: "positive",
       trendIcon: "down",
     },
@@ -1874,16 +2636,20 @@ function StatsGrid({ totalComplaints = 127 }) {
               </div>
             </div>
             <div className="relative mt-5 text-[48px] font-extrabold leading-none tracking-[-0.03em] text-text-primary">
-              <AnimatedStatValue
-                value={stat.value}
-                suffix={stat.suffix}
-                decimals={stat.decimals}
-                delay={index * 90}
-                className={stat.numberClass}
-              />
+              {typeof stat.value === "number" ? (
+                <AnimatedStatValue
+                  value={stat.value}
+                  suffix={stat.suffix}
+                  decimals={stat.decimals}
+                  delay={index * 90}
+                  className={stat.numberClass}
+                />
+              ) : (
+                <span className={stat.numberClass}>{stat.value}</span>
+              )}
             </div>
             <div className="relative mt-6 flex items-end justify-between gap-4">
-              <Sparkline dataKey={stat.spark} color={stat.sparkColor} />
+              <Sparkline dataKey={stat.spark} color={stat.sparkColor} data={statsData?.sparkline_data} />
               <TrendBadge
                 icon={stat.trendIcon}
                 tone={stat.trendTone}
@@ -1940,6 +2706,45 @@ function DashboardLoadingState() {
 
       <PriorityQueueSkeleton />
     </>
+  );
+}
+
+function DashboardLoadingFrame({ activePage }) {
+  if (activePage === "overview") {
+    return (
+      <div className="space-y-6 p-6">
+        <DashboardLoadingState />
+      </div>
+    );
+  }
+
+  return (
+    <DashboardPageShell
+      title={pageTitles[activePage]}
+      description="Loading live Civic Copilot data from the backend services."
+      action={
+        <span className="inline-flex items-center gap-2 rounded-badge bg-primary-light px-3 py-1 text-xs font-extrabold text-primary">
+          <RefreshCcw className="h-3.5 w-3.5 animate-spin" />
+          Syncing
+        </span>
+      }
+    >
+      <article className="rounded-card bg-white p-6 shadow-card">
+        <div className="flex items-center gap-4">
+          <SkeletonBlock className="h-12 w-12 rounded-[14px]" />
+          <div className="flex-1">
+            <SkeletonBlock className="h-4 w-[220px]" />
+            <SkeletonBlock className="mt-3 h-3 w-[420px]" />
+          </div>
+        </div>
+        <div className="mt-6 grid grid-cols-4 gap-3">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <SkeletonBlock key={index} className="h-24 rounded-card" />
+          ))}
+        </div>
+        <SkeletonBlock className="mt-6 h-[320px] rounded-card" />
+      </article>
+    </DashboardPageShell>
   );
 }
 
@@ -2111,12 +2916,32 @@ function PriorityQueueSkeleton() {
   );
 }
 
-function DepartmentPanel({ onFilter }) {
-  const total = departments.reduce((sum, item) => sum + item.count, 0);
+function DepartmentPanel({ onFilter, statsData }) {
+  const mergedDepartments = useMemo(() => {
+    if (!statsData?.departments) return departments;
+    return departments.map((dept) => {
+      const apiDept = statsData.departments.find(
+        (ad) =>
+          ad.name === dept.name ||
+          ad.name.includes(dept.id) ||
+          (dept.id === "PWD" && ad.name.includes("Public Works")) ||
+          (dept.id === "Water Dept" && ad.name.includes("Jal")) ||
+          (dept.id === "Utility Dept" && ad.name.includes("Electricity")) ||
+          (dept.id === "Municipal" && ad.name.includes("Sanitation"))
+      );
+      return {
+        ...dept,
+        count: apiDept ? apiDept.count : 0,
+        critical: apiDept ? apiDept.critical : 0,
+      };
+    });
+  }, [statsData]);
+
+  const total = mergedDepartments.reduce((sum, item) => sum + item.count, 0) || 1;
 
   return (
     <div className="grid h-full grid-rows-4 gap-3">
-      {departments.map((department) => {
+      {mergedDepartments.map((department) => {
         const Icon = department.icon;
         const width = Math.round((department.count / total) * 100);
         return (
@@ -2141,9 +2966,6 @@ function DepartmentPanel({ onFilter }) {
               />
             </div>
             <div className="mt-4 flex items-center justify-between">
-              <span className="rounded-badge bg-danger-light px-3 py-1 text-xs font-bold text-danger">
-                {department.critical} critical
-              </span>
               <button
                 type="button"
                 onClick={() => onFilter(department.id)}
@@ -2337,10 +3159,22 @@ function PriorityQueue({
 
 function CustomDropdown({ value, options, onChange, widthClass }) {
   const [open, setOpen] = useState(false);
+  const containerRef = useRef(null);
   const selected = options.find((option) => option.value === value) ?? options[0];
 
+  useEffect(() => {
+    if (!open) return;
+    function handleDocumentClick(event) {
+      if (containerRef.current && !containerRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("click", handleDocumentClick);
+    return () => document.removeEventListener("click", handleDocumentClick);
+  }, [open]);
+
   return (
-    <div className={cn("relative", widthClass)}>
+    <div ref={containerRef} className={cn("relative overflow-visible", open ? "z-[1400]" : "z-10", widthClass)}>
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
@@ -2358,7 +3192,7 @@ function CustomDropdown({ value, options, onChange, widthClass }) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 4, scale: 0.98 }}
             transition={{ duration: 0.14, ease: "easeOut" }}
-            className="absolute right-0 top-12 z-30 w-full overflow-hidden rounded-button border border-border bg-white py-1 shadow-elevated"
+            className="absolute right-0 top-12 z-[1450] w-full overflow-hidden rounded-button border border-border bg-white py-1 shadow-elevated"
           >
             {options.map((option) => (
               <button
@@ -2585,7 +3419,7 @@ function priorityScoreWidthClass(value) {
 }
 
 function departmentDisplayName(complaint) {
-  return complaint.departmentName ?? departments.find((item) => item.id === complaint.department)?.name ?? complaint.department;
+  return departments.find((item) => item.id === complaint.department)?.name ?? complaint.departmentName ?? complaint.department;
 }
 
 function departmentForComplaint(complaint) {
@@ -2782,6 +3616,25 @@ function ComplaintDetailModal({ complaint, onClose }) {
               </div>
             </div>
 
+            <div className="rounded-[12px] border border-primary/15 bg-primary-light/60 p-4">
+              <div className="flex items-start gap-3">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-button bg-white text-primary shadow-card">
+                  <Zap className="h-4 w-4" />
+                </span>
+                <div>
+                  <p className="text-sm font-extrabold text-text-primary">AI routing verdict</p>
+                  <p className="mt-1 text-sm leading-6 text-text-secondary">
+                    NLP classified this as <span className="font-bold text-text-primary">{complaint.issue}</span>, CV severity is scored at <span className="font-bold text-text-primary">{severityScore}/10</span>, and priority routing sends it to <span className="font-bold text-text-primary">{departmentDisplayName(complaint)}</span>.
+                  </p>
+                  <div className="mt-3 grid grid-cols-3 gap-2">
+                    <DecisionMetric label="Priority" value={Math.round(complaint.priorityScore)} />
+                    <DecisionMetric label="Urgency" value={complaint.urgency ?? "Review"} />
+                    <DecisionMetric label="Confidence" value={`${confidence}%`} />
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="rounded-[12px] border border-border bg-white">
               <button
                 type="button"
@@ -2875,6 +3728,15 @@ function AnalysisRow({ label, children }) {
     <div className="flex items-center justify-between gap-3">
       <p className="text-xs font-bold text-text-secondary">{label}</p>
       <div className="text-right text-sm">{children}</div>
+    </div>
+  );
+}
+
+function DecisionMetric({ label, value }) {
+  return (
+    <div className="rounded-button border border-white/70 bg-white p-2 text-center shadow-card">
+      <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-text-muted">{label}</p>
+      <p className="mt-1 truncate text-xs font-extrabold text-text-primary">{value}</p>
     </div>
   );
 }
